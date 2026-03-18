@@ -1,0 +1,25 @@
+{
+  "username": "pi",
+  "host": "pizero.local",
+  "port": 22,
+  "remoteDirectory": "/home/pi/nmea-tcp",
+  "privateKey": "/Users/reddyprasad/.ssh/personal",
+  "ignore": [
+    "node_modules",
+    "target",
+    "mock",
+    "web/node_modules",
+    "web/src/*",
+    "src",
+    "web/index.html",
+    "web/public",
+    "web/tsconfig.json",
+    "web/vite.config.ts",
+    "web/package.json",
+    "web/bun.lock",
+    "web/eslint*",
+    "web/README.md",
+    ".git",
+    "*.log"
+  ]
+}
