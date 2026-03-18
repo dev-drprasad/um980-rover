@@ -1,16 +1,15 @@
 use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Json, Router, routing::get};
 use axum_embed::ServeEmbed;
+use nusb::{DeviceInfo, MaybeFuture};
 use oxidize_pdf::PdfReader;
 use oxidize_pdf::parser::PdfDocument;
 use regex::Regex;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use serialport::SerialPortType;
-use std::collections::HashMap;
 use std::io::Cursor;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -52,6 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
     println!("API running on {}", addr);
 
+    get_available_ports().await?; // List available ports on startup
+
     let serve_web = ServeEmbed::<Assets>::with_parameters(
         Some("index.html".to_owned()),
         axum_embed::FallbackBehavior::NotFound,
@@ -81,38 +82,8 @@ struct UsbDevice {
     product: Option<String>,
 }
 
-async fn get_devices() -> Result<Json<HashMap<String, UsbDevice>>, AppError> {
-    let mut map = HashMap::new();
-    serialport::available_ports()
-        .map_err(|e| AppError::InternalError(anyhow::anyhow!(e)))?
-        .iter()
-        .filter_map(|port| {
-            // Check if the port is a USB device
-            if let SerialPortType::UsbPort(usb_info) = &port.port_type {
-                // Check if the hardware reported a product name
-                if let Some(product_name) = &usb_info.product {
-                    // Convert to lowercase for a safer, case-insensitive match
-                    // This will catch "USB Serial", "USB-Serial", "USB  Serial", etc.
-                    if product_name.to_lowercase().contains("usb serial") {
-                        return Some(UsbDevice {
-                            id: make_device_id(usb_info),
-                            name: usb_info
-                                .product
-                                .clone()
-                                .unwrap_or_else(|| "Unknown USB Serial Device".to_string()),
-                            vendor: Some(usb_info.vid.to_string()),
-                            product: Some(usb_info.pid.to_string()),
-                        });
-                    }
-                }
-            }
-            // If it's not a USB port, or doesn't match the name, filter it out
-            None
-        })
-        .for_each(|p| {
-            map.insert(p.id.clone(), p);
-        });
-    return Ok(Json(map));
+async fn get_devices() -> Result<Json<Vec<UsbDevice>>, AppError> {
+    return Ok(Json(get_available_ports().await?));
 }
 
 #[derive(Deserialize)]
@@ -128,11 +99,6 @@ async fn get_layers(Query(params): Query<GetLayersSearchParams>) -> Result<Json<
     let geojson = get_lpm_document(lpm).await?;
 
     Ok(Json(geojson))
-}
-
-/// Creates a unique hardware ID string based on the bus and address
-fn make_device_id(device: &serialport::UsbPortInfo) -> String {
-    format!("{}-{}", device.vid, device.pid)
 }
 
 async fn get_lpm_document(lpm: String) -> Result<Value, anyhow::Error> {
@@ -206,4 +172,65 @@ async fn get_lpm_document(lpm: String) -> Result<Value, anyhow::Error> {
     }
 
     return Ok(json!({}));
+}
+
+async fn is_cdc_acm(device_info: &DeviceInfo) -> bool {
+    // Open the device to inspect descriptors
+    let device = match device_info.open().wait() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+
+    // Get the active configuration descriptor
+    let config = match device.active_configuration() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    // Iterate through interfaces
+    for interface in config.interfaces() {
+        for alt in interface.alt_settings() {
+            println!(
+                "Checking interface: class {:02x}, subclass {:02x}, protocol {:02x}",
+                alt.class(),
+                alt.subclass(),
+                alt.protocol()
+            );
+            if alt.class() == 0xff {
+                if device_info.vendor_id() == 0x1a86 && device_info.product_id() == 0x7523 {
+                    println!("Found CH340 device, treating as CDC ACM");
+                    return true;
+                }
+            }
+            // CDC ACM Class/Subclass/Protocol
+            // Class 0x02, Subclass 0x02, Protocol 0x01
+            if alt.class() == 0x02 && alt.subclass() == 0x02 && alt.protocol() == 0x01 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn get_available_ports() -> Result<Vec<UsbDevice>, anyhow::Error> {
+    let mut serial_devices: Vec<UsbDevice> = Vec::new();
+    for device in nusb::list_devices().await? {
+        if is_cdc_acm(&device).await {
+            println!(
+                "Found CDC ACM Device: VID {:04x}, PID {:04x}",
+                device.vendor_id(),
+                device.product_id()
+            );
+            serial_devices.push(UsbDevice {
+                id: format!("{:04x}-{:04x}", device.vendor_id(), device.product_id()),
+                name: device
+                    .product_string()
+                    .unwrap_or_else(|| "Unknown CDC ACM Device")
+                    .to_string(),
+                vendor: Some(format!("{:04x}", device.vendor_id())),
+                product: Some(format!("{:04x}", device.product_id())),
+            });
+        }
+    }
+    Ok(serial_devices)
 }

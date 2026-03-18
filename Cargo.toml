@@ -20,10 +20,13 @@ anyhow = "1.0"
 tower-http = { version = "0.5", features = ["cors"] }
 rust-embed = "8.0"
 axum-embed = "0.1"
-reqwest = { version = "0.11", features = ["blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking","rustls-tls"] }
 
 
 [[bin]]
 name = "nmea-tcp"
 path = "main.rs"
 
+
+[target.arm-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
