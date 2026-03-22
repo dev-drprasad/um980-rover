@@ -1546,6 +1546,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-embed",
+ "base64",
  "futures",
  "futures-util",
  "nmea",

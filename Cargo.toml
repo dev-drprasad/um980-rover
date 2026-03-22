@@ -22,6 +22,7 @@ axum-embed = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "http2", "charset", "rustls-tls", "rustls-tls-native-roots"] }
 futures = "0.3"
 nmea = {version = "0.6", features = ["serde"]}
+base64 = "0.22"
 
 [[bin]]
 name = "nmea-tcp"

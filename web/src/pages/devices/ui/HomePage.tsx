@@ -1,9 +1,17 @@
-import { useState, useEffect } from "react";
-import Map, { Layer, Marker, Source } from "react-map-gl/maplibre"; // Import from maplibre
+import { useState, useEffect, useCallback } from "react";
+import Map, {
+  Layer,
+  Marker,
+  Source,
+  type LngLat,
+  type MapLayerMouseEvent,
+} from "react-map-gl/maplibre"; // Import from maplibre
 import { API_HOST, deviceAPI } from "../../../core";
 import { useSearchParams } from "react-router-dom";
 import "maplibre-gl/dist/maplibre-gl.css"; // Import the maplibre CSS
 import "./HomePage.css";
+import { useSaveTrack } from "../hooks/useSaveTrack";
+import { useTracks } from "../hooks/useTracks";
 
 const style = {
   version: 8,
@@ -47,6 +55,10 @@ export function HomePage() {
     latitude: 51.505,
     zoom: 18,
   });
+  const { save, status } = useSaveTrack();
+  const { data: tracks, refetch } = useTracks();
+
+  const [draftTrack, setDraftTrack] = useState<LngLat[] | null>(null);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>({
     fixType: null,
     altitudeMtrs: null,
@@ -55,6 +67,38 @@ export function HomePage() {
   });
   const [searchParams] = useSearchParams();
   const lpmNo = searchParams.get("lpm") || "";
+
+  const handleMapClick = useCallback((event: MapLayerMouseEvent) => {
+    console.log(event.lngLat);
+    setDraftTrack((prev) => (prev ? [...prev, event.lngLat] : [event.lngLat]));
+  }, []);
+
+  const handleEndTrack = useCallback(() => {
+    setDraftTrack((prev) => {
+      if (!prev) return null;
+      if (prev.length < 3) return prev; // Not enough points to form a track
+      const firstPoint = prev.at(0);
+      if (!firstPoint) return prev;
+
+      return prev ? [...prev, firstPoint] : null;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!draftTrack) return;
+    if (draftTrack.length < 3) return;
+    if (draftTrack.at(0) === draftTrack.at(-1)) {
+      save(draftTrack.map((lngLat) => [lngLat.lng, lngLat.lat]));
+    }
+  }, [draftTrack, save]);
+
+  useEffect(() => {
+    if (status === "success" && draftTrack) {
+      // @eslint-disable-next-line
+      setDraftTrack(null);
+      refetch();
+    }
+  }, [draftTrack, refetch, status]);
 
   // Example of fetching GeoJSON data from a URL
   useEffect(() => {
@@ -123,6 +167,10 @@ export function HomePage() {
     })();
   }, []);
 
+  const draftTrackGeoJSON = draftTrack ? trackToGeoJSON(draftTrack) : null;
+  const trackGeoJSON = tracks
+    ? tracks.map((track) => trackToGeoJSON(track))
+    : null;
   return (
     <div className="home-page-container">
       <div className="status">
@@ -139,6 +187,8 @@ export function HomePage() {
         {...viewState}
         onMove={(evt) => setViewState(evt.viewState)}
         mapStyle={styleURL}
+        onClick={handleMapClick}
+        maxZoom={18}
       >
         <Source
           id="geojson-data"
@@ -173,7 +223,49 @@ export function HomePage() {
             <div className="live-location-marker"></div>
           </Marker>
         )}
+        {draftTrackGeoJSON && (
+          <Source id="draft-track" type="geojson" data={draftTrackGeoJSON}>
+            <Layer
+              id="draft-track-layer"
+              type="line"
+              paint={{
+                "line-color": "#ff0000",
+                "line-width": 2,
+              }}
+            />
+            <Layer
+              id="draft-track-corners"
+              type="circle"
+              paint={{
+                "circle-color": "#ffffff",
+                "circle-stroke-color": "#ff0000",
+                "circle-radius": 4,
+                "circle-stroke-width": 2,
+              }}
+            />
+          </Source>
+        )}
+        {trackGeoJSON?.map((geoJSON, index) => (
+          <Source
+            id={`track-${index}`}
+            type="geojson"
+            data={geoJSON}
+            key={index}
+          >
+            <Layer
+              id={`track-layer-${index}`}
+              type="line"
+              paint={{
+                "line-color": "#0000ff",
+                "line-width": 2,
+              }}
+            />
+          </Source>
+        ))}
       </Map>
+      <button className="end-track-button" onClick={handleEndTrack}>
+        end
+      </button>
       <button
         onClick={() => {
           const latLng = liveStatus.latLng;
@@ -191,4 +283,20 @@ export function HomePage() {
       </button>
     </div>
   );
+}
+
+function trackToGeoJSON(track: LngLat[]): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: track.map((lngLat) => [lngLat.lng, lngLat.lat]),
+        },
+        properties: {},
+      },
+    ],
+  };
 }

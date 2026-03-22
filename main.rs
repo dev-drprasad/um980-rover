@@ -5,11 +5,10 @@ use axum::{
     Json, Router,
     extract::State,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    routing::get,
+    routing::{get, post},
 };
 use axum_embed::ServeEmbed;
 use futures::{sink::SinkExt, stream::StreamExt};
-use nmea::Nmea;
 use nusb::transfer::{Bulk, ControlOut, ControlType, In, Recipient};
 use nusb::{DeviceInfo, MaybeFuture, list_devices};
 use oxidize_pdf::PdfReader;
@@ -24,10 +23,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
-use tokio::time::sleep;
 use tower_http::cors::CorsLayer;
-
+mod appstate;
+mod ntrip_client;
+mod parse_nmea;
+mod track;
 #[derive(RustEmbed, Clone)]
 #[folder = "web/dist/"]
 struct Assets;
@@ -57,11 +59,6 @@ impl IntoResponse for AppError {
         }
     }
 }
-// We use an AppState to hold our global broadcast channel.
-// Any message sent into this channel will be pushed to all subscribers.
-struct AppState {
-    tx: broadcast::Sender<String>,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a broadcast channel with a buffer capacity of 100 messages
     let (tx, _rx) = broadcast::channel(100);
-    let app_state = Arc::new(AppState { tx: tx.clone() });
+    let app_state = Arc::new(appstate::AppState {
+        tx: tx.clone(),
+        file_lock: Mutex::new(()),
+    });
     tokio::spawn(async move {
         // The spawned task now owns `quantity` and `item_name`
         let _ = get_nmea_messages(tx.clone()).await;
@@ -85,6 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/devices", get(get_devices))
         .route("/api/layers", get(get_layers))
+        .route("/api/track", get(track::get_all_coordinates)) // GET route
+        .route("/api/track/:id", post(track::append_coordinates)) // POST route
         .route("/ws", get(ws_handler))
         .fallback_service(serve_web)
         .layer(CorsLayer::permissive())
@@ -272,12 +274,12 @@ async fn get_available_ports() -> Result<Vec<UsbDevice>, anyhow::Error> {
 // The handler extracts the WebSocket and our shared State
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<appstate::AppState>>,
 ) -> axum::response::Response {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
     println!("A new client connected!");
 
     // 1. Split the WebSocket into a Send half and a Receive half
@@ -450,155 +452,27 @@ async fn get_nmea_messages(tx: broadcast::Sender<String>) -> Result<(), anyhow::
 
     // 5. Find the Bulk IN endpoint dynamically
     // (For CH340 it is almost always 0x82, but it's safest to check)
-    let bulk_in_ep = 0x82;
-    // for interface in device_info.active_config().unwrap().interfaces() {
-    //     for alt in interface.alt_settings() {
-    //         for ep in alt.endpoints() {
-    //             if ep.direction() == nusb::descriptors::Direction::In
-    //                 && ep.transfer_type() == nusb::descriptors::TransferType::Bulk
-    //             {
-    //                 bulk_in_ep = ep.address();
-    //             }
-    //         }
-    //     }
-    // }
-
-    println!("Listening for data on Endpoint: 0x{:02X}", bulk_in_ep);
-
-    // 6. Create a standard std::io::Read reader from the endpoint
-    // This handles all the underlying queueing and buffer management automatically!
-    let mut reader = interface.endpoint::<Bulk, In>(bulk_in_ep)?.reader(4096);
-    let mut buf = [0u8; 64];
-
-    // 1. Create a buffer to reconstruct split lines
-    let mut line_buffer = String::new();
-
-    // 2. Initialize the NMEA state machine
-    let mut nmea_state = Nmea::default();
-
-    // 7. The Read Loop
-    loop {
-        // This will block until data arrives, exactly like reading from a serial port
-        match reader.read(&mut buf) {
-            Ok(bytes_read) => {
-                if bytes_read > 0 {
-                    if let Ok(text) = std::str::from_utf8(&buf[..bytes_read]) {
-                        // Push the new USB text into our holding buffer
-                        line_buffer.push_str(text);
-
-                        // Process complete lines one by one
-                        while let Some(newline_index) = line_buffer.find('\n') {
-                            // Extract the sentence and remove the trailing \r\n
-                            let sentence = line_buffer[..=newline_index].trim().to_string();
-
-                            // Remove the parsed sentence from the buffer so we don't read it again
-                            line_buffer.drain(..=newline_index);
-
-                            // Only parse lines that actually look like NMEA data
-                            if sentence.starts_with('$') {
-                                match nmea_state.parse(&sentence) {
-                                    Ok(_) => {
-                                        // The state machine successfully updated!
-                                        // Let's print out the useful info:
-                                        println!("--- GPS UPDATE ---");
-
-                                        if let (Some(lat), Some(lng)) =
-                                            (nmea_state.latitude, nmea_state.longitude)
-                                        {
-                                            println!("Location: {:.6}, {:.6}", lat, lng);
-                                            match tx.send(
-                                                json!({
-                                                    "event": "latLngUpdate",
-                                                    "data": {
-                                                        "latitude": lat,
-                                                        "longitude": lng
-                                                    }
-                                                })
-                                                .to_string(),
-                                            ) {
-                                                Ok(_) => {} // Message sent successfully
-                                                Err(e) => {
-                                                    eprintln!("Failed to send GPS update: {}", e);
-                                                }
-                                            }
-                                        }
-                                        if let Some(alt) = nmea_state.altitude {
-                                            match tx.send(
-                                                json!({
-                                                    "event": "altitudeUpdate",
-                                                    "data": {
-                                                        "altitudeMtrs": alt
-                                                    }
-                                                })
-                                                .to_string(),
-                                            ) {
-                                                Ok(_) => {} // Message sent successfully
-                                                Err(e) => {
-                                                    eprintln!(
-                                                        "Failed to send altitude update: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        if let Some(speed) = nmea_state.speed_over_ground {
-                                            println!("Speed: {} knots", speed);
-                                        }
-
-                                        if let Some(fix_type) = nmea_state.fix_type() {
-                                            println!("Fix Type: {:?}", fix_type);
-                                            match tx.send(
-                                                json!({
-                                                    "event": "fixUpdate",
-                                                    "data": {
-                                                        "fixType": fix_type,
-                                                    }
-                                                })
-                                                .to_string(),
-                                            ) {
-                                                Ok(_) => {} // Message sent successfully
-                                                Err(e) => {
-                                                    eprintln!("Failed to send GPS update: {}", e);
-                                                }
-                                            }
-                                        }
-
-                                        println!(
-                                            "Satellites Tracked: {}",
-                                            nmea_state.satellites().len()
-                                        );
-                                        match tx.send(
-                                            json!({
-                                                "event": "statusUpdate",
-                                                "data": {
-                                                    "satellites": nmea_state.satellites().len()
-                                                }
-                                            })
-                                            .to_string(),
-                                        ) {
-                                            Ok(_) => {} // Message sent successfully
-                                            Err(e) => {
-                                                eprintln!("Failed to send GPS update: {}", e);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to parse NMEA sentence: {}", e);
-                                    }
-                                }
-                            }
-                        }
+    let mut ep_in = 0;
+    let mut ep_out = 0;
+    for interface in device.active_configuration()?.interfaces() {
+        for alt in interface.alt_settings() {
+            for ep in alt.endpoints() {
+                if ep.transfer_type() == nusb::descriptors::TransferType::Bulk {
+                    if ep.direction() == nusb::transfer::Direction::In {
+                        ep_in = ep.address();
+                    }
+                    if ep.direction() == nusb::transfer::Direction::Out {
+                        ep_out = ep.address();
                     }
                 }
             }
-            Err(e) => {
-                println!("Error reading from USB: {}", e);
-                sleep(Duration::from_secs(1)).await;
-                break;
-            }
         }
-        sleep(Duration::from_millis(700)).await;
     }
+
+    println!("USB IN: 0x{:02X}, USB OUT: 0x{:02X}", ep_in, ep_out);
+
+    ntrip_client::ntrip_client(interface.clone(), interface.clone(), ep_out, ep_in, tx).await?;
+    // parse_nmea::parse_nmea(interface, ep_in, &tx);
 
     Ok(())
 }
