@@ -3,5 +3,6 @@ use tokio::sync::broadcast;
 
 pub struct AppState {
     pub tx: broadcast::Sender<String>,
+    pub nmea_tx: broadcast::Sender<String>,
     pub file_lock: Mutex<()>,
 }

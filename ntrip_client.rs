@@ -1,3 +1,4 @@
+use crate::mynmea;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nmea::Nmea;
 use nusb::Interface;
@@ -178,7 +179,8 @@ pub async fn ntrip_client(
                                                 json!({
                                                     "event": "statusUpdate",
                                                     "data": {
-                                                        "satellites": nmea_state.satellites().len()
+                                                        "satellites": nmea_state.satellites().len(),
+                                                        "fixSatellites": nmea_state.fix_satellites()
                                                     }
                                                 })
                                                 .to_string(),
@@ -188,12 +190,67 @@ pub async fn ntrip_client(
                                                     eprintln!("Failed to send GPS update: {}", e);
                                                 }
                                             }
+
+                                            let hdop = nmea_state.hdop();
+                                            match tx.send(
+                                                json!({
+                                                    "event": "hdopUpdate",
+                                                    "data": {
+                                                        "hdop": hdop
+                                                    }
+                                                })
+                                                .to_string(),
+                                            ) {
+                                                Ok(_) => {} // Message sent successfully
+                                                Err(e) => {
+                                                    eprintln!("Failed to send HDOP update: {}", e);
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             eprintln!(
                                                 "Failed to parse NMEA sentence: {}. Error: {}",
                                                 sentence.trim(),
                                                 e
+                                            );
+                                        }
+                                    }
+
+                                    if sentence.contains("GNGST") {
+                                        if let Some(accuracy) =
+                                            mynmea::parse_gst_accuracy(&sentence)
+                                        {
+                                            println!(
+                                                "GST Accuracy - Lat Err: {:.2}m, Lon Err: {:.2}m, DRMS: {:.2}m, 2DRMS: {:.2}m",
+                                                accuracy.lat_err,
+                                                accuracy.lon_err,
+                                                accuracy.drms,
+                                                accuracy.twice_drms
+                                            );
+                                            match tx.send(
+                                                json!({
+                                                    "event": "accuracyUpdate",
+                                                    "data": {
+                                                        "latErrCM": accuracy.lat_err *100.0,
+                                                        "lonErrCM": accuracy.lon_err*100.0,
+                                                        "drmsCM": accuracy.drms *100.0,
+                                                        "twiceDrmsCM": accuracy.twice_drms *100.0
+                                                    }
+                                                })
+                                                .to_string(),
+                                            ) {
+                                                Ok(_) => {} // Message sent successfully
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "Failed to send accuracy update: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            eprintln!(
+                                                "Failed to extract GST accuracy from sentence: {}",
+                                                sentence.trim()
                                             );
                                         }
                                     }

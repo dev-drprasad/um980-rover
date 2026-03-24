@@ -6,12 +6,12 @@ import Map, {
   type LngLat,
   type MapLayerMouseEvent,
 } from "react-map-gl/maplibre"; // Import from maplibre
-import { API_HOST, deviceAPI } from "../../../core";
+import { API_HOST, deviceAPI } from "../../core";
 import { useSearchParams } from "react-router-dom";
 import "maplibre-gl/dist/maplibre-gl.css"; // Import the maplibre CSS
 import "./HomePage.css";
-import { useSaveTrack } from "../hooks/useSaveTrack";
-import { useTracks } from "../hooks/useTracks";
+import { useSaveTrack } from "../devices/hooks/useSaveTrack";
+import { useTracks } from "../devices/hooks/useTracks";
 
 const style = {
   version: 8,
@@ -39,11 +39,25 @@ const jsonString = JSON.stringify(style);
 const blob = new Blob([jsonString], { type: "application/json" });
 const styleURL = URL.createObjectURL(blob);
 
+interface HorizontalAccuracy {
+  lat_err: number;
+  lon_err: number;
+  drms: number;
+  twice_drms: number;
+}
+
 interface LiveStatus {
-  fixType: string | null;
-  altitudeMtrs: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  altitude: number | null;
+  speed_over_ground: number | null;
+  fix_type: string | null;
   satellites: number;
-  latLng: { longitude: number; latitude: number } | null;
+  fix_satellites: number | null;
+  accuracy: HorizontalAccuracy | null;
+  hdop: number | null;
+  vdop: number | null;
+  pdop: number | null;
 }
 
 export function HomePage() {
@@ -60,10 +74,17 @@ export function HomePage() {
 
   const [draftTrack, setDraftTrack] = useState<LngLat[] | null>(null);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>({
-    fixType: null,
-    altitudeMtrs: null,
+    latitude: null,
+    longitude: null,
+    altitude: null,
+    speed_over_ground: null,
+    fix_type: null,
     satellites: 0,
-    latLng: null,
+    fix_satellites: null,
+    accuracy: null,
+    hdop: null,
+    vdop: null,
+    pdop: null,
   });
   const [searchParams] = useSearchParams();
   const lpmNo = searchParams.get("lpm") || "";
@@ -126,32 +147,8 @@ export function HomePage() {
             const parsedData = JSON.parse(event.data);
             if ("data" in parsedData && "event" in parsedData) {
               switch (parsedData.event) {
-                case "latLngUpdate":
-                  setLiveStatus((prev) => ({
-                    ...prev,
-                    latLng: {
-                      longitude: parsedData.data.longitude,
-                      latitude: parsedData.data.latitude,
-                    },
-                  }));
-                  break;
-                case "fixUpdate":
-                  setLiveStatus((prev) => ({
-                    ...prev,
-                    fixType: parsedData.data.fixType,
-                  }));
-                  break;
-                case "statusUpdate":
-                  setLiveStatus((prev) => ({
-                    ...prev,
-                    satellites: parsedData.data.satellites,
-                  }));
-                  break;
-                case "altitudeUpdate":
-                  setLiveStatus((prev) => ({
-                    ...prev,
-                    altitudeMtrs: parsedData.data.altitudeMtrs,
-                  }));
+                case "live_status":
+                  setLiveStatus(parsedData.data as LiveStatus);
                   break;
                 default:
                   console.warn("Unknown event type:", parsedData.event);
@@ -174,13 +171,28 @@ export function HomePage() {
   return (
     <div className="home-page-container">
       <div className="status">
-        {(liveStatus.fixType || "N/A").toUpperCase()}{" "}
+        {(liveStatus.fix_type || "N/A").toUpperCase()}{" "}
         <span className="seperator">|</span>
         <span className="emoji">🛰️</span>
-        {liveStatus.satellites || 0}
+        {liveStatus.fix_satellites || 0}/{liveStatus.satellites || 0}
         <span className="seperator">|</span>
         <span className="emoji">🗻</span>
-        {(liveStatus.altitudeMtrs || 0).toFixed(2)}m
+        {(liveStatus.altitude || 0).toFixed(2)}m
+        <span className="seperator">|</span>
+        <span className="err">σₗₐₜ</span>
+        {(liveStatus.accuracy?.lat_err || 0).toFixed(2)}m
+        <span className="seperator">|</span>
+        <span className="err">σₗₒₙ</span>
+        {(liveStatus.accuracy?.lon_err || 0).toFixed(2)}m
+        <span className="seperator">|</span>
+        <span className="hdop err">HDOP </span>{" "}
+        {(liveStatus.hdop || 0).toFixed(2)}
+        <span className="seperator">|</span>
+        <span className="drms">r₆₈</span>
+        {(liveStatus.accuracy?.drms || 0).toFixed(2)}m
+        <span className="seperator">|</span>
+        <span className="drms">r₉₅</span>
+        {(liveStatus.accuracy?.twice_drms || 0).toFixed(2)}m
       </div>
 
       <Map
@@ -215,8 +227,8 @@ export function HomePage() {
         </Source>
         {location && (
           <Marker
-            longitude={liveStatus.latLng?.longitude || 0}
-            latitude={liveStatus.latLng?.latitude || 0}
+            longitude={liveStatus.longitude || 0}
+            latitude={liveStatus.latitude || 0}
             anchor="center" // Positions the bottom of the marker at the coordinate
           >
             {/* You can use a custom component for the marker, e.g., a blue dot SVG */}
@@ -268,12 +280,13 @@ export function HomePage() {
       </button>
       <button
         onClick={() => {
-          const latLng = liveStatus.latLng;
-          if (latLng) {
+          const latitude = liveStatus.latitude;
+          const longitude = liveStatus.longitude;
+          if (latitude !== null && longitude !== null) {
             setViewState((prev) => ({
               ...prev,
-              longitude: latLng.longitude,
-              latitude: latLng.latitude,
+              longitude,
+              latitude,
             }));
           }
         }}

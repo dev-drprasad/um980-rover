@@ -9,7 +9,7 @@ use axum::{
 };
 use axum_embed::ServeEmbed;
 use futures::{sink::SinkExt, stream::StreamExt};
-use nusb::transfer::{Bulk, ControlOut, ControlType, In, Recipient};
+use nusb::transfer::{ControlOut, ControlType, Recipient};
 use nusb::{DeviceInfo, MaybeFuture, list_devices};
 use oxidize_pdf::PdfReader;
 use oxidize_pdf::parser::PdfDocument;
@@ -18,7 +18,7 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Cursor;
-use std::io::{Error, ErrorKind, Read};
+use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -27,8 +27,10 @@ use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 mod appstate;
+mod mynmea;
 mod ntrip_client;
-mod parse_nmea;
+mod send_live_status_to_client;
+mod send_nmea_to_client;
 mod track;
 #[derive(RustEmbed, Clone)]
 #[folder = "web/dist/"]
@@ -67,13 +69,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a broadcast channel with a buffer capacity of 100 messages
     let (tx, _rx) = broadcast::channel(100);
+    let (nmea_tx, _rx) = broadcast::channel(100);
     let app_state = Arc::new(appstate::AppState {
         tx: tx.clone(),
+        nmea_tx: nmea_tx.clone(),
         file_lock: Mutex::new(()),
     });
     tokio::spawn(async move {
-        // The spawned task now owns `quantity` and `item_name`
-        let _ = get_nmea_messages(tx.clone()).await;
+        let _ = mynmea::read_nmea_and_broadcast(nmea_tx.clone()).await;
     });
 
     let serve_web = ServeEmbed::<Assets>::with_parameters(
@@ -87,7 +90,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/layers", get(get_layers))
         .route("/api/track", get(track::get_all_coordinates)) // GET route
         .route("/api/track/:id", post(track::append_coordinates)) // POST route
-        .route("/ws", get(ws_handler))
+        .route(
+            "/ws",
+            get(send_live_status_to_client::send_live_status_to_client),
+        )
+        .route("/nmea-ws", get(send_nmea_to_client::send_nmea_to_client))
         .fallback_service(serve_web)
         .layer(CorsLayer::permissive())
         .with_state(app_state);

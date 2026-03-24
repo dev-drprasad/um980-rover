@@ -1,0 +1,24 @@
+.terminal-page {
+  height: 100%;
+  padding: 1rem;
+  ul {
+    list-style-type: none;
+    padding: 0;
+    margin: 0;
+    font-family: FiraCode, monospace;
+    height: 100%;
+    display: flex;
+    flex-direction: column-reverse;
+    overflow-y: auto;
+
+    li {
+      text-align: left;
+      padding:  0 0.4rem;
+      word-wrap: break-word;
+
+      .msg {
+        color: darkcyan;
+      }
+    }
+  }
+}

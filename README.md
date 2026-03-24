@@ -3,3 +3,5 @@
 `sudo usermod -aG dialout $USER`
 
 `newgrp dialout`
+
+https://www.lddgo.net/en/coordinate/nmea-0183-parser
