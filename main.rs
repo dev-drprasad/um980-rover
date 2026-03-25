@@ -3,14 +3,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{
     Json, Router,
-    extract::State,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     routing::{get, post},
 };
 use axum_embed::ServeEmbed;
-use futures::{sink::SinkExt, stream::StreamExt};
-use nusb::transfer::{ControlOut, ControlType, Recipient};
-use nusb::{DeviceInfo, MaybeFuture, list_devices};
+use nusb::{DeviceInfo, MaybeFuture};
 use oxidize_pdf::PdfReader;
 use oxidize_pdf::parser::PdfDocument;
 use regex::Regex;
@@ -18,9 +14,7 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Cursor;
-use std::io::{Error, ErrorKind};
 use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -68,15 +62,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
 
     // Create a broadcast channel with a buffer capacity of 100 messages
-    let (tx, _rx) = broadcast::channel(100);
+    let (rtcm_tx, _rx) = broadcast::channel(100);
     let (nmea_tx, _rx) = broadcast::channel(100);
     let app_state = Arc::new(appstate::AppState {
-        tx: tx.clone(),
+        rtcm_tx: rtcm_tx.clone(),
         nmea_tx: nmea_tx.clone(),
         file_lock: Mutex::new(()),
     });
+    let nmea_tx_for_device = nmea_tx.clone();
+    let rtcm_tx_for_device = rtcm_tx.clone();
     tokio::spawn(async move {
-        let _ = mynmea::read_nmea_and_broadcast(nmea_tx.clone()).await;
+        let _ = mynmea::read_nmea_and_broadcast(nmea_tx_for_device, rtcm_tx_for_device).await;
+    });
+
+    let rtcm_tx_for_ntrip = rtcm_tx.clone();
+    let nmea_tx_for_ntrip = nmea_tx.clone();
+    tokio::spawn(async move {
+        let _ = ntrip_client::ntrip_client(nmea_tx_for_ntrip, rtcm_tx_for_ntrip)
+            .await
+            .expect("Failed to setup ntrip client");
     });
 
     let serve_web = ServeEmbed::<Assets>::with_parameters(
@@ -276,210 +280,4 @@ async fn get_available_ports() -> Result<Vec<UsbDevice>, anyhow::Error> {
         }
     }
     Ok(serial_devices)
-}
-
-// The handler extracts the WebSocket and our shared State
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<appstate::AppState>>,
-) -> axum::response::Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
-}
-
-async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
-    println!("A new client connected!");
-
-    // 1. Split the WebSocket into a Send half and a Receive half
-    let (mut socket_sender, mut socket_receiver) = socket.split();
-
-    // 2. Subscribe this specific client to the global broadcast channel
-    let mut broadcast_rx = state.tx.subscribe();
-
-    // 3. TASK 1: The "Writing" Task
-    // This background task listens for messages on the global broadcast channel
-    // and pushes them down the WebSocket to the client.
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = broadcast_rx.recv().await {
-            if socket_sender.send(Message::Text(msg)).await.is_err() {
-                break; // Exit if the connection dropped
-            }
-        }
-    });
-
-    // 4. TASK 2: The "Reading" Task
-    // This background task listens to the client's WebSocket. When the client
-    // sends a message, it forwards it to the global broadcast channel.
-    let broadcast_tx = state.tx.clone();
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = socket_receiver.next().await {
-            // Send the client's message to everyone else!
-            let _ = broadcast_tx.send(format!("User says: {}", text));
-        }
-    });
-
-    // 5. The Concurrency Manager
-    // Wait until either the sending task or receiving task finishes.
-    // If a client disconnects, `recv_task` finishes. We then abort the `send_task`
-    // so we don't leak memory keeping a dead connection alive.
-    tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
-    };
-
-    println!("A client disconnected.");
-}
-
-// async fn start_coordinate_stream(tx: broadcast::Sender<String>) {
-//     let coordinates = vec![
-//         vec![78.901093, 13.557264],
-//         vec![78.901209, 13.557210],
-//         vec![78.901018, 13.556719],
-//     ];
-
-//     println!("Starting continuous coordinate broadcast...");
-//     // .cycle() turns our vector into an infinite loop.
-//     // When it reaches the last coordinate, it seamlessly starts over at the first one.
-//     let mut coord_iter = coordinates.iter().cycle();
-
-//     loop {
-//         let pt = coord_iter.next().unwrap();
-
-//         // Assuming your vector is [lng, lat] based on your previous GeoJSON code
-//         let lng = pt[0];
-//         let lat = pt[1];
-
-//         // Format the data as a JSON string so the browser can easily parse it
-//         let payload = json!({
-//             "event": "liveLocation",
-//             "data": {
-//                 "latitude": lat,
-//                 "longitude": lng
-//             }
-//         });
-
-//         // Broadcast to all connected WebSocket clients.
-//         // We intentionally ignore the Result here (using `let _ =`).
-//         // tx.send() returns an error if NO clients are currently connected,
-//         // which is perfectly fine—we just keep broadcasting to the empty room until someone joins!
-//         let _ = tx.send(payload.to_string());
-
-//         // Wait for 1 second before sending the next point
-//         sleep(Duration::from_millis(1000)).await;
-//     }
-// }
-
-async fn get_nmea_messages(tx: broadcast::Sender<String>) -> Result<(), anyhow::Error> {
-    // 1. Find the CH340 device (VID: 0x1A86, PID: 0x7523)
-    // Note: list_devices() is usually synchronous in nusb, so we just iterate it.
-    let device_info = list_devices()
-        .await?
-        .find(|dev| dev.vendor_id() == 0x1a86 && dev.product_id() == 0x7523)
-        .ok_or_else(|| Error::new(ErrorKind::NotFound, "CH340 device not found"))?;
-
-    println!("Found device: {:?}", device_info);
-
-    // 2. Open the device
-    // We use .wait()? to resolve the MaybeFuture synchronously
-    let device = device_info.open().wait()?;
-
-    // 3. Claim the interfaces (0 for Control, 1 for Data)
-    let interface = device.detach_and_claim_interface(0).await?;
-    // let data_interface = device.detach_and_claim_interface(1).await?;
-
-    // 4. Assert DTR/RTS to wake up the serial chip
-    // This tells the CH340 that a terminal is ready to receive data.
-    // control_interface
-    //     .control_out(
-    //         ControlOut {
-    //             control_type: ControlType::Class,
-    //             recipient: Recipient::Interface,
-    //             request: 0x22,
-    //             value: 0x03,
-    //             index: 0x00,
-    //             data: &[],
-    //         },
-    //         Duration::from_millis(100),
-    //     )
-    //     .wait()?;
-
-    // 4. CH340 Proprietary Initialization & Baud Rate Setup
-    // Use ControlType::Vendor instead of Class for CH340 chips
-
-    // A. Initialize the chip
-    interface
-        .control_out(
-            ControlOut {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: 0xA1,
-                value: 0x0000,
-                index: 0x0000,
-                data: &[],
-            },
-            Duration::from_millis(100),
-        )
-        .wait()?;
-
-    // B. Set the Baud Rate
-    // Most standard GPS modules use 9600. If yours is newer, it might be 115200.
-    // 9600 Baud   = index: 0xB202
-    // 115200 Baud = index: 0xCC03
-    interface
-        .control_out(
-            ControlOut {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: 0x9A,
-                value: 0x1312,
-                index: 0xCC03, // <--- Change this to 0xCC03 if 9600 gives you garbage!
-                data: &[],
-            },
-            Duration::from_millis(100),
-        )
-        .wait()?;
-
-    // C. Set Line Control (8 data bits, No parity, 1 stop bit) & Enable UART
-    interface
-        .control_out(
-            ControlOut {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: 0x9A,
-                value: 0x2518,
-                index: 0x00C3,
-                data: &[],
-            },
-            Duration::from_millis(100),
-        )
-        .wait()?;
-
-    println!("CH340 Initialized. Baud rate set. Listening...");
-
-    println!("DTR/RTS asserted. Device should start transmitting...");
-
-    // 5. Find the Bulk IN endpoint dynamically
-    // (For CH340 it is almost always 0x82, but it's safest to check)
-    let mut ep_in = 0;
-    let mut ep_out = 0;
-    for interface in device.active_configuration()?.interfaces() {
-        for alt in interface.alt_settings() {
-            for ep in alt.endpoints() {
-                if ep.transfer_type() == nusb::descriptors::TransferType::Bulk {
-                    if ep.direction() == nusb::transfer::Direction::In {
-                        ep_in = ep.address();
-                    }
-                    if ep.direction() == nusb::transfer::Direction::Out {
-                        ep_out = ep.address();
-                    }
-                }
-            }
-        }
-    }
-
-    println!("USB IN: 0x{:02X}, USB OUT: 0x{:02X}", ep_in, ep_out);
-
-    ntrip_client::ntrip_client(interface.clone(), interface.clone(), ep_out, ep_in, tx).await?;
-    // parse_nmea::parse_nmea(interface, ep_in, &tx);
-
-    Ok(())
 }

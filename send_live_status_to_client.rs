@@ -29,7 +29,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
     // 3. TASK 1: The "Writing" Task
     // This background task listens for messages on the global broadcast channel
     // and pushes them down the WebSocket to the client.
-    let mut send_task = tokio::spawn(async move {
+    tokio::spawn(async move {
         while let Ok(msg) = broadcast_rx.recv().await {
             if let Ok(nmea_messages) = serde_json::from_str::<Vec<String>>(&msg) {
                 match parse_nmea(nmea_messages).await {
@@ -45,26 +45,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
             }
         }
     });
-
-    // 4. TASK 2: The "Reading" Task
-    // This background task listens to the client's WebSocket. When the client
-    // sends a message, it forwards it to the global broadcast channel.
-    let broadcast_tx = state.tx.clone();
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = socket_receiver.next().await {
-            // Send the client's message to everyone else!
-            let _ = broadcast_tx.send(format!("User says: {}", text));
-        }
-    });
-
-    // 5. The Concurrency Manager
-    // Wait until either the sending task or receiving task finishes.
-    // If a client disconnects, `recv_task` finishes. We then abort the `send_task`
-    // so we don't leak memory keeping a dead connection alive.
-    tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
-    };
 
     println!("A client disconnected.");
 }

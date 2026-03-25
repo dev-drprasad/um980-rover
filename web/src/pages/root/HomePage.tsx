@@ -86,6 +86,7 @@ export function HomePage() {
     vdop: null,
     pdop: null,
   });
+  const [liveStatusLoading, setLiveStatusLoading] = useState(true);
   const [searchParams] = useSearchParams();
   const lpmNo = searchParams.get("lpm") || "";
 
@@ -139,6 +140,7 @@ export function HomePage() {
   }, [lpmNo]);
 
   useEffect(() => {
+    let timerId: number | undefined = undefined;
     (async () => {
       const socket = new WebSocket(`ws://${API_HOST}/ws`);
       socket.addEventListener("message", (event) => {
@@ -146,13 +148,20 @@ export function HomePage() {
           try {
             const parsedData = JSON.parse(event.data);
             if ("data" in parsedData && "event" in parsedData) {
+              clearTimeout(timerId);
+              setLiveStatusLoading(false);
               switch (parsedData.event) {
-                case "live_status":
-                  setLiveStatus(parsedData.data as LiveStatus);
+                case "live_status": {
+                  const data = parsedData.data as LiveStatus;
+                  if (data.latitude && data.longitude) {
+                    setLiveStatus(data);
+                  }
                   break;
+                }
                 default:
                   console.warn("Unknown event type:", parsedData.event);
               }
+              timerId = setTimeout(() => setLiveStatusLoading(true), 1500);
             }
           } catch (error) {
             console.error("Error parsing WebSocket message:", error);
@@ -162,6 +171,8 @@ export function HomePage() {
         }
       });
     })();
+
+    return () => clearTimeout(timerId);
   }, []);
 
   const draftTrackGeoJSON = draftTrack ? trackToGeoJSON(draftTrack) : null;
@@ -193,6 +204,8 @@ export function HomePage() {
         <span className="seperator">|</span>
         <span className="drms">r₉₅</span>
         {(liveStatus.accuracy?.twice_drms || 0).toFixed(2)}m
+        <span className="seperator">|</span>
+        {liveStatusLoading && <span className="spinner"></span>}
       </div>
 
       <Map

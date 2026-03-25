@@ -1,18 +1,16 @@
 use nusb::{
     MaybeFuture,
-    io::EndpointRead,
+    io::{EndpointRead, EndpointWrite},
     list_devices,
-    transfer::{Bulk, ControlOut, ControlType, In, Recipient},
+    transfer::{Bulk, ControlOut, ControlType, In, Out, Recipient},
 };
 use regex::Regex;
 use serde_json::json;
 use std::io::{Error, ErrorKind};
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::{
-    io::AsyncReadExt,
-    time::{interval, sleep},
-};
+use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncReadExt, time::interval};
 pub mod parse_nmea;
 
 /// Holds the calculated horizontal accuracy metrics in meters.
@@ -54,8 +52,11 @@ pub fn parse_gst_accuracy(raw_sentence: &str) -> Option<HorizontalAccuracy> {
     })
 }
 
-pub async fn read_nmea_and_broadcast(nmea_tx: tokio::sync::broadcast::Sender<String>) {
-    let mut usb_reader = connect_to_device()
+pub async fn read_nmea_and_broadcast(
+    nmea_tx: tokio::sync::broadcast::Sender<String>,
+    rtcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+) {
+    let (mut usb_reader, mut usb_writer) = connect_to_device()
         .await
         .expect("Failed to connect to GPS device");
     tokio::spawn(async move {
@@ -120,9 +121,25 @@ pub async fn read_nmea_and_broadcast(nmea_tx: tokio::sync::broadcast::Sender<Str
             }
         }
     });
+
+    let mut rtcm_receiver = rtcm_tx.subscribe();
+    _ = tokio::spawn(async move {
+        while let Ok(msg) = rtcm_receiver.recv().await {
+            if let Err(e) = usb_writer.write_all(&msg).await {
+                println!("Failed to write RTCM to USB: {}", e);
+                break;
+            }
+            // Force the buffer to push to the hardware immediately
+            if let Err(e) = usb_writer.flush().await {
+                println!("Failed to flush USB writer: {}", e);
+                break;
+            }
+            println!("Received {} bytes of RTCM, forwarded to USB.", msg.len());
+        }
+    })
 }
 
-async fn connect_to_device() -> Result<EndpointRead<Bulk>, anyhow::Error> {
+async fn connect_to_device() -> Result<(EndpointRead<Bulk>, EndpointWrite<Bulk>), anyhow::Error> {
     // 1. Find the CH340 device (VID: 0x1A86, PID: 0x7523)
     // Note: list_devices() is usually synchronous in nusb, so we just iterate it.
     let device_info = list_devices()
@@ -232,6 +249,7 @@ async fn connect_to_device() -> Result<EndpointRead<Bulk>, anyhow::Error> {
 
     println!("USB IN: 0x{:02X}, USB OUT: 0x{:02X}", ep_in, ep_out);
 
-    let mut usb_reader = interface.endpoint::<Bulk, In>(ep_in)?.reader(4096);
-    Ok(usb_reader)
+    let usb_reader = interface.endpoint::<Bulk, In>(ep_in)?.reader(4096);
+    let usb_writer = interface.endpoint::<Bulk, Out>(ep_out)?.writer(4096);
+    Ok((usb_reader, usb_writer))
 }

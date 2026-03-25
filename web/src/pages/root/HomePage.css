@@ -20,6 +20,16 @@
     align-items: center;
     flex-wrap: wrap;
 
+    .spinner {
+      display: block;
+      width: 1rem;
+      height: 1rem;
+      border: 0.15rem solid lightgray;
+      border-top: 0.15rem solid slateblue;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
     .seperator {
       color: lightgray;
       margin: 0 1rem;
@@ -88,5 +98,15 @@
     z-index: 2;
     padding: 0;
     padding-bottom: 0.2rem;
+  }
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+
+  100% {
+    transform: rotate(360deg);
   }
 }

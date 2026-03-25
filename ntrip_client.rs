@@ -1,9 +1,4 @@
-use crate::mynmea;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use nmea::Nmea;
-use nusb::Interface;
-use nusb::transfer::{Bulk, In, Out};
-use serde_json::json;
 use std::env;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,11 +6,8 @@ use tokio::net::TcpStream;
 use tokio::time::sleep;
 
 pub async fn ntrip_client(
-    usb_tx: Interface,
-    usb_rx: Interface,
-    ep_out: u8,
-    ep_in: u8,
-    tx: tokio::sync::broadcast::Sender<String>,
+    nmea_tx: tokio::sync::broadcast::Sender<String>,
+    rtcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) -> anyhow::Result<()> {
     println!("Connecting to NTRIP Caster...");
     let mut tcp_stream = TcpStream::connect("rtk2go.com:2101").await?;
@@ -45,28 +37,17 @@ pub async fn ntrip_client(
     // Split the TCP socket into a reader (RTCM data) and writer (GGA data)
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
-    // ==========================================
-    // 3. TASK A: DOWNLOAD RTCM -> WRITE TO USB
-    // ==========================================
-    let mut usb_writer = usb_tx.endpoint::<Bulk, Out>(ep_out)?.writer(4096);
     let mut rtcm_task = tokio::spawn(async move {
         let mut rtcm_buf = [0u8; 1024];
         loop {
-            println!("Waiting for RTCM data from NTRIP...");
             match tcp_read.read(&mut rtcm_buf).await {
                 Ok(bytes_read) => {
                     if bytes_read > 0 {
                         // Shovel the raw binary data straight into the USB OUT endpoint
-                        if let Err(e) = usb_writer.write_all(&rtcm_buf[..bytes_read]).await {
-                            println!("Failed to write RTCM to USB: {}", e);
+                        if let Err(e) = rtcm_tx.send(rtcm_buf[..bytes_read].to_vec()) {
+                            println!("Failed to send RTCM data: {}", e);
                             break;
                         }
-                        // Force the buffer to push to the hardware immediately
-                        if let Err(e) = usb_writer.flush().await {
-                            println!("Failed to flush USB writer: {}", e);
-                            break;
-                        }
-                        println!("Received {} bytes of RTCM, forwarded to USB.", bytes_read);
                     } else {
                         println!("NTRIP Stream gave 0 bytes");
                         break;
@@ -81,204 +62,20 @@ pub async fn ntrip_client(
         }
     });
 
-    // ==========================================
-    // 4. TASK B: READ USB NMEA -> UPLOAD GGA TO CASTER
-    // ==========================================
-    let mut usb_reader = usb_rx.endpoint::<Bulk, In>(ep_in)?.reader(4096);
-    let mut nmea_state = Nmea::default();
+    let mut broadcast_rx = nmea_tx.subscribe();
     let mut nmea_task = tokio::spawn(async move {
-        let mut buf = [0u8; 64];
-        let mut line_buffer = String::new();
-        // 7. The Read Loop
-        loop {
-            // This will block until data arrives, exactly like reading from a serial port
-            match usb_reader.read(&mut buf).await {
-                Ok(bytes_read) => {
-                    if bytes_read > 0 {
-                        if let Ok(text) = std::str::from_utf8(&buf[..bytes_read]) {
-                            // Push the new USB text into our holding buffer
-                            line_buffer.push_str(text);
-
-                            // Process complete lines one by one
-                            while let Some(idx) = line_buffer.find('\n') {
-                                let sentence = line_buffer[..=idx].to_string();
-                                line_buffer.drain(..=idx);
-
-                                if sentence.starts_with('$') {
-                                    match nmea_state.parse(&sentence) {
-                                        Ok(_) => {
-                                            if let Some(fix_type) = nmea_state.fix_type() {
-                                                println!("Fix Type: {:?}", fix_type);
-                                                match tx.send(
-                                                    json!({
-                                                        "event": "fixUpdate",
-                                                        "data": {
-                                                            "fixType": fix_type,
-                                                        }
-                                                    })
-                                                    .to_string(),
-                                                ) {
-                                                    Ok(_) => {} // Message sent successfully
-                                                    Err(e) => {
-                                                        eprintln!(
-                                                            "Failed to send GPS update: {}",
-                                                            e
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            if let (Some(lat), Some(lng)) =
-                                                (nmea_state.latitude, nmea_state.longitude)
-                                            {
-                                                println!("Location: {:.6}, {:.6}", lat, lng);
-                                                match tx.send(
-                                                    json!({
-                                                        "event": "latLngUpdate",
-                                                        "data": {
-                                                            "latitude": lat,
-                                                            "longitude": lng
-                                                        }
-                                                    })
-                                                    .to_string(),
-                                                ) {
-                                                    Ok(_) => {} // Message sent successfully
-                                                    Err(e) => {
-                                                        eprintln!(
-                                                            "Failed to send GPS update: {}",
-                                                            e
-                                                        );
-                                                    }
-                                                }
-                                            }
-
-                                            if let Some(alt) = nmea_state.altitude {
-                                                match tx.send(
-                                                    json!({
-                                                        "event": "altitudeUpdate",
-                                                        "data": {
-                                                            "altitudeMtrs": alt
-                                                        }
-                                                    })
-                                                    .to_string(),
-                                                ) {
-                                                    Ok(_) => {} // Message sent successfully
-                                                    Err(e) => {
-                                                        eprintln!(
-                                                            "Failed to send altitude update: {}",
-                                                            e
-                                                        );
-                                                    }
-                                                }
-                                            }
-
-                                            println!(
-                                                "Satellites Tracked: {}",
-                                                nmea_state.satellites().len()
-                                            );
-                                            match tx.send(
-                                                json!({
-                                                    "event": "statusUpdate",
-                                                    "data": {
-                                                        "satellites": nmea_state.satellites().len(),
-                                                        "fixSatellites": nmea_state.fix_satellites()
-                                                    }
-                                                })
-                                                .to_string(),
-                                            ) {
-                                                Ok(_) => {} // Message sent successfully
-                                                Err(e) => {
-                                                    eprintln!("Failed to send GPS update: {}", e);
-                                                }
-                                            }
-
-                                            let hdop = nmea_state.hdop();
-                                            match tx.send(
-                                                json!({
-                                                    "event": "hdopUpdate",
-                                                    "data": {
-                                                        "hdop": hdop
-                                                    }
-                                                })
-                                                .to_string(),
-                                            ) {
-                                                Ok(_) => {} // Message sent successfully
-                                                Err(e) => {
-                                                    eprintln!("Failed to send HDOP update: {}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "Failed to parse NMEA sentence: {}. Error: {}",
-                                                sentence.trim(),
-                                                e
-                                            );
-                                        }
-                                    }
-
-                                    if sentence.contains("GNGST") {
-                                        if let Some(accuracy) =
-                                            mynmea::parse_gst_accuracy(&sentence)
-                                        {
-                                            println!(
-                                                "GST Accuracy - Lat Err: {:.2}m, Lon Err: {:.2}m, DRMS: {:.2}m, 2DRMS: {:.2}m",
-                                                accuracy.lat_err,
-                                                accuracy.lon_err,
-                                                accuracy.drms,
-                                                accuracy.twice_drms
-                                            );
-                                            match tx.send(
-                                                json!({
-                                                    "event": "accuracyUpdate",
-                                                    "data": {
-                                                        "latErrCM": accuracy.lat_err *100.0,
-                                                        "lonErrCM": accuracy.lon_err*100.0,
-                                                        "drmsCM": accuracy.drms *100.0,
-                                                        "twiceDrmsCM": accuracy.twice_drms *100.0
-                                                    }
-                                                })
-                                                .to_string(),
-                                            ) {
-                                                Ok(_) => {} // Message sent successfully
-                                                Err(e) => {
-                                                    eprintln!(
-                                                        "Failed to send accuracy update: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            eprintln!(
-                                                "Failed to extract GST accuracy from sentence: {}",
-                                                sentence.trim()
-                                            );
-                                        }
-                                    }
-                                }
-
-                                // Is it a GGA sentence? (Supports both $GPGGA and $GNGGA)
-                                if sentence.contains("GGA,") {
-                                    // Send the sentence back up the TCP socket to the caster!
-                                    if let Err(e) = tcp_write.write_all(sentence.as_bytes()).await {
-                                        println!("Failed to upload GGA to Caster: {}", e);
-                                        break;
-                                    }
-                                    println!("Uploaded VRS position: {}", sentence.trim());
-                                }
-
-                                // (Optional: You can still pipe the sentence to your `nmea` crate
-                                // parser here to update your frontend WebSocket!)
-                            }
+        while let Ok(msg) = broadcast_rx.recv().await {
+            if let Ok(nmea_messages) = serde_json::from_str::<Vec<String>>(&msg) {
+                for setentense in nmea_messages {
+                    if setentense.contains("GGA,") {
+                        if let Err(e) = tcp_write.write_all(setentense.as_bytes()).await {
+                            println!("Failed to upload GGA to Caster: {}", e);
+                            break;
                         }
+                        println!("Uploaded VRS position: {}", setentense.trim());
                     }
                 }
-                Err(e) => {
-                    println!("USB NMEA Stream closed by device: {}", e);
-                    break;
-                }
             }
-
-            sleep(Duration::from_millis(700)).await;
         }
     });
 

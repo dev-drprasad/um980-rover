@@ -43,14 +43,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
         }
     });
 
-    // 4. TASK 2: The "Reading" Task
-    // This background task listens to the client's WebSocket. When the client
-    // sends a message, it forwards it to the global broadcast channel.
-    let broadcast_tx = state.tx.clone();
+    let command_tx = state.rtcm_tx.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(Message::Text(text))) = socket_receiver.next().await {
             // Send the client's message to everyone else!
-            let _ = broadcast_tx.send(format!("User says: {}", text));
+            let _ = command_tx.send(text.into_bytes());
         }
     });
 
