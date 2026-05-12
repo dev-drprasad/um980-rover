@@ -10,6 +10,25 @@ interface SerialDevice {
   product: string;
 }
 
+interface TrackPayload {
+  name: string;
+  type: "track";
+  coordinates: [number, number][];
+}
+interface BookmarkPayload {
+  name: string;
+  type: "bookmark";
+  coordinates: [number, number];
+}
+
+interface DraftPayload {
+  name: string;
+  type: "draft";
+  coordinates: [number, number][];
+}
+
+type SavePayload = TrackPayload | BookmarkPayload | DraftPayload;
+
 export function useSaveTrack() {
   const [{ data, status }, setState] = useState<QueryData<SerialDevice[]>>({
     data: null,
@@ -17,7 +36,7 @@ export function useSaveTrack() {
   });
   const [payloadStr, setPayloadStr] = useState("");
 
-  const save = useCallback((payload: unknown) => {
+  const save = useCallback((payload: SavePayload) => {
     try {
       setPayloadStr(JSON.stringify(payload));
     } catch (error) {
@@ -29,10 +48,14 @@ export function useSaveTrack() {
     (async () => {
       if (!payloadStr) return;
       setState({ data: null, status: "pending" });
+      const payload = JSON.parse(payloadStr) as SavePayload;
       try {
-        await deviceAPI.post<SerialDevice[]>(`track/${randomUUID()}`, {
-          body: payloadStr,
-        });
+        await deviceAPI.post<SerialDevice[]>(
+          `track/${payload.type === "draft" ? "draft" : randomUUID()}`,
+          {
+            body: payloadStr,
+          },
+        );
 
         setState({ data: null, status: "success" });
       } catch (error) {

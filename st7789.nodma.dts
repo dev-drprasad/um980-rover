@@ -1,0 +1,52 @@
+    /dts-v1/;
+    /plugin/;
+
+    / {
+        /* Compatible with Radxa Zero 3W (RK3566 series) */
+        compatible = "rockchip,rk3568", "rockchip,rk3566";
+
+        fragment@0 {
+            target = <&spi3>; /* Target SPI3 because of Pins 19 and 23 */
+            __overlay__ {
+                dmas = <>;
+                dma-names = "";
+                status = "okay";
+
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                /* Ensure the pinctrl for SPI3 is active */
+                pinctrl-names = "default";
+                pinctrl-0 = <&spi3m1_cs0 &spi3m1_pins>;
+
+                panel@0 {
+                    compatible = "st7789v-waveshare", "panel-mipi-dbi-spi";
+                    reg = <0>; /* Chip Select 0 on SPI0 */
+                    spi-max-frequency = <4000000>; /* 16 MHz */
+
+                    /* Physical screen dimensions in millimeters (Approx 1.3 inch) */
+                    width-mm = <24>;
+                    height-mm = <24>;
+
+                    /* Wiring: Adjust these numbers if you moved your jumper wires! */
+                    /* dc: GPIO3_C1 (Pin 113) / reset: GPIO3_B2 (Pin 106) */
+                    dc-gpios = <&gpio3 17 0>;
+                    reset-gpios = <&gpio3 10 0>;
+
+                    /* Dummy timing block to satisfy the Linux DRM math checker */
+                    panel-timing {
+                        hactive = <240>;
+                        vactive = <240>;
+                        hfront-porch = <0>;
+                        hsync-len = <0>;
+                        hback-porch = <20>;
+
+                        vfront-porch = <0>;
+                        vsync-len    = <0>;
+                        vback-porch = <20>;
+                        clock-frequency = <4000000>; /* 4MHz */
+                    };
+                };
+            };
+        };
+    };

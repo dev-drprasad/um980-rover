@@ -1,0 +1,48 @@
+.button {
+  background-color: wheat;
+  color: slateblue;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 1rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 5.4rem;
+  font-weight: 600;
+  font-size: 1.2em;
+  border: 0rem solid white;
+  outline: 0rem solid slateblue;
+  transition: outline-width 0.4s ease-in-out, border-width 0.2s ease-in-out;
+
+  &:disabled {
+    background-color: lightgray;
+    color: rgb(180, 180, 180);
+    cursor: not-allowed;
+  }
+
+  &.selected {
+    outline-width: 0.4rem;
+    border-width: 0.2rem;
+  }
+}
+
+.icon-button {
+  aspect-ratio: 1 / 1;
+  padding: 0.6rem;
+  border-radius: 50%;
+  
+  svg {
+    font-size: 1.8em;
+    color: inherit !important;
+  }
+}
+
+.button.filled-button {
+  background-color: slateblue;
+  color: wheat;
+
+  &:focus {
+    outline: 0.4rem solid wheat;
+  }
+}

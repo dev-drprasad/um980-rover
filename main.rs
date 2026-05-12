@@ -1,6 +1,4 @@
 use axum::extract::Query;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::{
     Json, Router,
     routing::{get, post},
@@ -15,46 +13,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 mod appstate;
+mod get_current_latlng;
 mod mynmea;
 mod ntrip_client;
 mod send_live_status_to_client;
 mod send_nmea_to_client;
 mod track;
+
 #[derive(RustEmbed, Clone)]
 #[folder = "web/dist/"]
 struct Assets;
-
-#[derive(Debug, Error)]
-enum AppError {
-    #[error("Item not found")]
-    NotFound,
-    #[error("Internal server error: {0}")]
-    InternalError(#[from] anyhow::Error), // Example for generic errors
-}
-
-// Implement IntoResponse for the custom error type
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        match self {
-            AppError::NotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
-            AppError::InternalError(ref err) => {
-                // Log the error detail here if desired
-                eprintln!("Internal error: {:?}", err);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "An internal error occurred",
-                )
-                    .into_response()
-            }
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -92,7 +65,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/devices", get(get_devices))
         .route("/api/layers", get(get_layers))
+        .route("/api/latlng", get(get_current_latlng::get_current_latlng)) // GET route
+        .route("/api/ntrip-settings", get(ntrip_client::get_ntrip_settings)) // GET route
+        .route(
+            "/api/ntrip-settings",
+            post(ntrip_client::set_ntrip_settings),
+        ) // POST route
         .route("/api/track", get(track::get_all_coordinates)) // GET route
+        .route("/api/draft", get(track::get_draft_points_handler)) // GET route
+        .route("/api/draft/save", post(track::save_draft_handler)) // POST route
+        .route("/api/draft/undo", post(track::undo_draft_handler)) // POST route
         .route("/api/track/:id", post(track::append_coordinates)) // POST route
         .route(
             "/ws",
@@ -116,7 +98,7 @@ struct UsbDevice {
     product: Option<String>,
 }
 
-async fn get_devices() -> Result<Json<Vec<UsbDevice>>, AppError> {
+async fn get_devices() -> Result<Json<Vec<UsbDevice>>, appstate::AppError> {
     return Ok(Json(get_available_ports().await?));
 }
 
@@ -125,10 +107,12 @@ struct GetLayersSearchParams {
     lpm: Option<String>,
 }
 
-async fn get_layers(Query(params): Query<GetLayersSearchParams>) -> Result<Json<Value>, AppError> {
-    let lpm = params.lpm.ok_or_else(|| AppError::NotFound)?; // Return 404 if lpm is missing
+async fn get_layers(
+    Query(params): Query<GetLayersSearchParams>,
+) -> Result<Json<Value>, appstate::AppError> {
+    let lpm = params.lpm.ok_or_else(|| appstate::AppError::NotFound)?; // Return 404 if lpm is missing
     if lpm.is_empty() {
-        return Err(AppError::NotFound); // Return 404 if lpm is empty
+        return Err(appstate::AppError::NotFound); // Return 404 if lpm is empty
     }
     let geojson = get_lpm_document(lpm).await?;
 

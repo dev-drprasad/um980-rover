@@ -1,17 +1,33 @@
-import { useState, useEffect, useCallback } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  type ReactNode,
+} from "react";
 import Map, {
   Layer,
   Marker,
+  Popup,
   Source,
-  type LngLat,
   type MapLayerMouseEvent,
 } from "react-map-gl/maplibre"; // Import from maplibre
-import { API_HOST, deviceAPI } from "../../core";
+import { API_HOST, deviceAPI, SOUNDS } from "../../core";
 import { useSearchParams } from "react-router-dom";
-import "maplibre-gl/dist/maplibre-gl.css"; // Import the maplibre CSS
-import "./HomePage.css";
 import { useSaveTrack } from "../devices/hooks/useSaveTrack";
 import { useTracks } from "../devices/hooks/useTracks";
+import { AddTrackToolbar } from "./AddTrackToolbar";
+import type { LiveStatusAPI } from "../../entities/LiveStatusAPI";
+import type { LatLng } from "../../entities/LatLng";
+import { FilledIconButton } from "../../shared/button/Button";
+import LocationIcon from "../../assets/location.svg?react";
+import "maplibre-gl/dist/maplibre-gl.css"; // Import the maplibre CSS
+import "./HomePage.css";
+import { LiveStatus } from "./LiveStatus";
+import type { TrackInfo } from "../../entities/types/TrackInfo";
+import { useDraftTrack } from "../../entities/hooks/useDraftTrack";
+import { useUndoDraftPoint } from "../devices/hooks/useUndoDraftPoint";
+import { useMoveDraftToTrack } from "../devices/hooks/useMoveDraftToTrack";
 
 const style = {
   version: 8,
@@ -39,41 +55,26 @@ const jsonString = JSON.stringify(style);
 const blob = new Blob([jsonString], { type: "application/json" });
 const styleURL = URL.createObjectURL(blob);
 
-interface HorizontalAccuracy {
-  lat_err: number;
-  lon_err: number;
-  drms: number;
-  twice_drms: number;
-}
-
-interface LiveStatus {
-  latitude: number | null;
-  longitude: number | null;
-  altitude: number | null;
-  speed_over_ground: number | null;
-  fix_type: string | null;
-  satellites: number;
-  fix_satellites: number | null;
-  accuracy: HorizontalAccuracy | null;
-  hdop: number | null;
-  vdop: number | null;
-  pdop: number | null;
-}
-
 export function HomePage() {
   // You can load your GeoJSON data here, e.g., via an import or fetch
   const [geojsonData, setGeojsonData] =
     useState<GeoJSON.FeatureCollection | null>(null);
   const [viewState, setViewState] = useState({
-    longitude: -0.09,
-    latitude: 51.505,
-    zoom: 18,
+    longitude: -0.09151008366981728,
+    latitude: 51.504856420091755,
+    zoom: 18, // should be less than osm maxzoom
   });
+
   const { save, status } = useSaveTrack();
   const { data: tracks, refetch } = useTracks();
+  const { data: draftTrack, refetch: refectDraft } = useDraftTrack();
+  const { save: moveDraftToTrack, status: moveDraftToTrackStatus } =
+    useMoveDraftToTrack();
+  const { save: undoDraftPoint, status: undoDraftPointStatus } =
+    useUndoDraftPoint();
 
-  const [draftTrack, setDraftTrack] = useState<LngLat[] | null>(null);
-  const [liveStatus, setLiveStatus] = useState<LiveStatus>({
+  // const [draftTrack, setDraftTrack] = useDraftTrack();
+  const [liveStatus, setLiveStatus] = useState<LiveStatusAPI>({
     latitude: null,
     longitude: null,
     altitude: null,
@@ -89,38 +90,124 @@ export function HomePage() {
   const [liveStatusLoading, setLiveStatusLoading] = useState(true);
   const [searchParams] = useSearchParams();
   const lpmNo = searchParams.get("lpm") || "";
+  const [popupInfo, setPopupInfo] = useState<{
+    coordinates: LatLng;
+    content: ReactNode;
+  } | null>(null);
+
+  const handleAddDraftPoint = useCallback(
+    (latLng: LatLng) => {
+      (async function () {
+        await save({
+          name: "draft",
+          type: "draft",
+          coordinates: [
+            ...(draftTrack?.points || []).map(
+              (point) => [point.lat, point.lng] satisfies [number, number],
+            ),
+            [latLng.lat, latLng.lng],
+          ],
+        });
+        refectDraft();
+      })();
+    },
+    [draftTrack, refectDraft, save],
+  );
+
+  const handleBookMarkLocation = useCallback(
+    (name: string) => {
+      if (liveStatus.latitude && liveStatus.longitude) {
+        save({
+          name,
+          type: "bookmark",
+          coordinates: [liveStatus.latitude, liveStatus.longitude],
+        });
+      }
+    },
+    [liveStatus.latitude, liveStatus.longitude, save],
+  );
 
   const handleMapClick = useCallback((event: MapLayerMouseEvent) => {
-    console.log(event.lngLat);
-    setDraftTrack((prev) => (prev ? [...prev, event.lngLat] : [event.lngLat]));
-  }, []);
+    const { lngLat, features } = event;
 
-  const handleEndTrack = useCallback(() => {
-    setDraftTrack((prev) => {
-      if (!prev) return null;
-      if (prev.length < 3) return prev; // Not enough points to form a track
-      const firstPoint = prev.at(0);
-      if (!firstPoint) return prev;
+    if (!features?.length) return;
 
-      return prev ? [...prev, firstPoint] : null;
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!draftTrack) return;
-    if (draftTrack.length < 3) return;
-    if (draftTrack.at(0) === draftTrack.at(-1)) {
-      save(draftTrack.map((lngLat) => [lngLat.lng, lngLat.lat]));
+    // there will be multiple `features` if one polygon inside another
+    // or line overlaps with polygon.
+    // TODO: need to handle this case
+    if (features[0].layer.id.startsWith("track-polygon-layer-")) {
+      const properties = features[0].properties || {};
+      setPopupInfo({
+        coordinates: { lat: lngLat.lat, lng: lngLat.lng },
+        content: (
+          <div>
+            {Object.entries(properties).map(([key, value]) => (
+              <div key={key}>
+                {key}: {value}
+              </div>
+            ))}
+          </div>
+        ),
+      });
     }
-  }, [draftTrack, save]);
+  }, []);
+
+  const handleUndoPoint = useCallback(() => {
+    undoDraftPoint();
+  }, [undoDraftPoint]);
+
+  const handleTrackSaveConfirmation = useCallback(
+    (params: { name: string }) => {
+      if (!draftTrack) return;
+      moveDraftToTrack({ name: params.name });
+    },
+    [draftTrack, moveDraftToTrack],
+  );
+
+  // useEffect(() => {
+  //   if (!draftTrack) return;
+  //   if (draftTrack.points.length < 3) return;
+
+  //   save({
+  //     name: "Track",
+  //     type: "track",
+  //     coordinates: draftTrack.points.map((lngLat) => [lngLat.lng, lngLat.lat]),
+  //   });
+  // }, [draftTrack, save]);
 
   useEffect(() => {
     if (status === "success" && draftTrack) {
       // @eslint-disable-next-line
-      setDraftTrack(null);
+      // setDraftTrack(null);
       refetch();
+      SOUNDS.success.play();
+    }
+    if (status === "error") {
+      SOUNDS.error.play();
     }
   }, [draftTrack, refetch, status]);
+
+  useEffect(() => {
+    if (moveDraftToTrackStatus === "success") {
+      refetch();
+      refectDraft();
+      SOUNDS.success.play();
+    }
+    if (moveDraftToTrackStatus === "error") {
+      SOUNDS.error.play();
+    }
+  }, [moveDraftToTrackStatus, refetch, refectDraft]);
+
+  useEffect(() => {
+    if (undoDraftPointStatus === "success") {
+      refetch();
+      refectDraft();
+      SOUNDS.success.play();
+    }
+    if (undoDraftPointStatus === "error") {
+      SOUNDS.error.play();
+    }
+  }, [undoDraftPointStatus, refetch, refectDraft]);
 
   // Example of fetching GeoJSON data from a URL
   useEffect(() => {
@@ -129,13 +216,6 @@ export function HomePage() {
         .get<GeoJSON.FeatureCollection>(`layers?lpm=${lpmNo}`)
         .json();
       setGeojsonData(geoJSON);
-      // const [lng, lat] = geoJSON
-      //   ? geoJSON.features[0].geometry.type === "Polygon"
-      //     ? geoJSON.features[0].geometry.coordinates[0][0]
-      //     : [0, 0]
-      //   : [0, 0];
-      // console.log("geojsonData :>> ", geoJSON);
-      // setViewState((prev) => ({ ...prev, longitude: lng, latitude: lat }));
     })();
   }, [lpmNo]);
 
@@ -152,7 +232,7 @@ export function HomePage() {
               setLiveStatusLoading(false);
               switch (parsedData.event) {
                 case "live_status": {
-                  const data = parsedData.data as LiveStatus;
+                  const data = parsedData.data as LiveStatusAPI;
                   if (data.latitude && data.longitude) {
                     setLiveStatus(data);
                   }
@@ -176,44 +256,32 @@ export function HomePage() {
   }, []);
 
   const draftTrackGeoJSON = draftTrack ? trackToGeoJSON(draftTrack) : null;
+
   const trackGeoJSON = tracks
     ? tracks.map((track) => trackToGeoJSON(track))
     : null;
+  const trackPolygonGeoJSON = tracks
+    ? tracks.map((track) => trackToPolygonGeoJSON(track))
+    : null;
+
+  const interactiveLayerIds = useMemo(() => {
+    const ids = ["draft-track-corners"];
+    if (tracks) {
+      ids.push(...tracks.map((_, index) => `track-polygon-layer-${index}`));
+    }
+    return ids;
+  }, [tracks]);
+
   return (
     <div className="home-page-container">
-      <div className="status">
-        {(liveStatus.fix_type || "N/A").toUpperCase()}{" "}
-        <span className="seperator">|</span>
-        <span className="emoji">🛰️</span>
-        {liveStatus.fix_satellites || 0}/{liveStatus.satellites || 0}
-        <span className="seperator">|</span>
-        <span className="emoji">🗻</span>
-        {(liveStatus.altitude || 0).toFixed(2)}m
-        <span className="seperator">|</span>
-        <span className="err">σₗₐₜ</span>
-        {(liveStatus.accuracy?.lat_err || 0).toFixed(2)}m
-        <span className="seperator">|</span>
-        <span className="err">σₗₒₙ</span>
-        {(liveStatus.accuracy?.lon_err || 0).toFixed(2)}m
-        <span className="seperator">|</span>
-        <span className="hdop err">HDOP </span>{" "}
-        {(liveStatus.hdop || 0).toFixed(2)}
-        <span className="seperator">|</span>
-        <span className="drms">r₆₈</span>
-        {(liveStatus.accuracy?.drms || 0).toFixed(2)}m
-        <span className="seperator">|</span>
-        <span className="drms">r₉₅</span>
-        {(liveStatus.accuracy?.twice_drms || 0).toFixed(2)}m
-        <span className="seperator">|</span>
-        {liveStatusLoading && <span className="spinner"></span>}
-      </div>
-
+      <LiveStatus liveStatus={liveStatus} isLoading={liveStatusLoading} />
       <Map
         {...viewState}
         onMove={(evt) => setViewState(evt.viewState)}
-        mapStyle={styleURL}
         onClick={handleMapClick}
-        maxZoom={18}
+        mapStyle={styleURL}
+        maxZoom={30}
+        interactiveLayerIds={interactiveLayerIds}
       >
         <Source
           id="geojson-data"
@@ -249,7 +317,13 @@ export function HomePage() {
           </Marker>
         )}
         {draftTrackGeoJSON && (
-          <Source id="draft-track" type="geojson" data={draftTrackGeoJSON}>
+          <Source
+            id="draft-track"
+            type="geojson"
+            data={draftTrackGeoJSON}
+            tolerance={0}
+            buffer={128}
+          >
             <Layer
               id="draft-track-layer"
               type="line"
@@ -270,28 +344,79 @@ export function HomePage() {
             />
           </Source>
         )}
+        {trackPolygonGeoJSON?.map((geoJSON, index) => (
+          <Source
+            id={`track-polygon-${index}`}
+            type="geojson"
+            data={geoJSON}
+            key={index}
+            tolerance={0}
+            buffer={128}
+          >
+            <Layer
+              id={`track-polygon-layer-${index}`}
+              type="fill"
+              paint={{
+                "fill-color": "tomato",
+                "fill-opacity": 0.2,
+              }}
+            />
+            <Layer
+              id={`track-polygon-outline-${index}`}
+              type="line"
+              paint={{
+                "line-color": "tomato",
+                "line-width": 2,
+              }}
+            />
+          </Source>
+        ))}
         {trackGeoJSON?.map((geoJSON, index) => (
           <Source
             id={`track-${index}`}
             type="geojson"
             data={geoJSON}
             key={index}
+            tolerance={0}
+            buffer={128}
           >
             <Layer
-              id={`track-layer-${index}`}
-              type="line"
-              paint={{
-                "line-color": "#0000ff",
-                "line-width": 2,
+              id={`track-symbol-layer-${index}`}
+              type="symbol"
+              layout={{
+                "symbol-placement": "line-center",
+                "text-field": "{distanceInCM}",
+                "text-font": ["Inter Bold"],
+                "text-size": 14,
+                "text-offset": [0, -1],
+                "text-anchor": "bottom",
+                "text-allow-overlap": true,
+                "text-ignore-placement": true,
               }}
+              paint={{ "text-color": "slateblue" }}
             />
           </Source>
         ))}
+        {popupInfo && (
+          <Popup
+            longitude={popupInfo.coordinates.lng}
+            latitude={popupInfo.coordinates.lat}
+            anchor="bottom"
+            onClose={() => setPopupInfo(null)}
+          >
+            {popupInfo.content}
+          </Popup>
+        )}
       </Map>
-      <button className="end-track-button" onClick={handleEndTrack}>
-        end
-      </button>
-      <button
+      <AddTrackToolbar
+        draftTrack={draftTrack}
+        className="add-track-toolbar"
+        onUpdate={handleAddDraftPoint}
+        onUndo={handleUndoPoint}
+        onBookMarkLocation={handleBookMarkLocation}
+        onSaveTrackConfirmation={handleTrackSaveConfirmation}
+      />
+      <FilledIconButton
         onClick={() => {
           const latitude = liveStatus.latitude;
           const longitude = liveStatus.longitude;
@@ -305,24 +430,52 @@ export function HomePage() {
         }}
         className="move-to-live-location"
       >
-        ⌖
-      </button>
+        <LocationIcon />
+      </FilledIconButton>
     </div>
   );
 }
 
-function trackToGeoJSON(track: LngLat[]): GeoJSON.FeatureCollection {
+function trackToPolygonGeoJSON(
+  trackInfo: TrackInfo,
+): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
     features: [
       {
         type: "Feature",
         geometry: {
-          type: "LineString",
-          coordinates: track.map((lngLat) => [lngLat.lng, lngLat.lat]),
+          type: "Polygon",
+          coordinates: [
+            trackInfo.sides.flatMap(({ side }) =>
+              side.map((lngLat) => [lngLat.lng, lngLat.lat]),
+            ),
+          ],
         },
-        properties: {},
+        properties: {
+          Name: trackInfo.name,
+          "Area (sq. m)": trackInfo.areaInSqM.toFixed(2),
+          "Area (cents)": trackInfo.areaInCents.toFixed(2),
+        },
       },
     ],
+  };
+}
+
+function trackToGeoJSON(trackInfo: TrackInfo): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: trackInfo.sides.map(({ side, distanceInCM }) => {
+      return {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: side.map((lngLat) => [lngLat.lng, lngLat.lat]),
+        },
+        properties: {
+          distanceInCM: `${distanceInCM.toFixed(2)}cm`,
+        },
+      };
+    }),
   };
 }

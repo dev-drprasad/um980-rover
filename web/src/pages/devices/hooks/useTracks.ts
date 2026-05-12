@@ -2,12 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { deviceAPI } from "../../../core";
 import type { QueryData } from "../../../shared/utils/types/QueryData";
 import { LngLat } from "maplibre-gl";
-
-type TracksAPI = { [key: string]: [number, number][] };
-type Tracks = LngLat[][];
+import type {
+  TrackInfo,
+  TrackInfoAPI,
+} from "../../../entities/types/TrackInfo";
 
 export function useTracks() {
-  const [{ data, status }, setState] = useState<QueryData<Tracks>>({
+  const [{ data, status }, setState] = useState<QueryData<TrackInfo[]>>({
     data: null,
     status: "pending",
   });
@@ -21,14 +22,9 @@ export function useTracks() {
     (async () => {
       setState({ data: null, status: "fetching" });
       try {
-        const tracks = await deviceAPI.get<TracksAPI>("track").json();
-        console.log("tracks :>> ", tracks);
+        const tracks = await deviceAPI.get<TrackInfoAPI[]>("track").json();
         setState({
-          data: tracks
-            ? Object.values(tracks).map((p) =>
-                p.map(([lng, lat]) => new LngLat(lng, lat)),
-              )
-            : null,
+          data: tracks ? mapTrackInfoAPIToTrackInfo(tracks) : null,
           status: "success",
         });
       } catch (error) {
@@ -39,4 +35,23 @@ export function useTracks() {
   }, [status]);
 
   return { data: data, status, refetch };
+}
+
+function mapTrackInfoAPIToTrackInfo(trackInfoAPI: TrackInfoAPI[]): TrackInfo[] {
+  return trackInfoAPI.map((track) => {
+    return {
+      id: track.id,
+      name: track.name,
+      areaInSqM: track.area,
+      areaInCents: track.area_in_cents,
+      sides: track.sides.map((side) => ({
+        side: [
+          new LngLat(side.side[0][1], side.side[0][0]),
+          new LngLat(side.side[1][1], side.side[1][0]),
+        ],
+        distanceInCM: side.distance_in_cm,
+      })),
+      points: track.points,
+    };
+  });
 }

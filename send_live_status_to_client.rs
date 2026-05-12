@@ -21,7 +21,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
     println!("A new client connected!");
 
     // 1. Split the WebSocket into a Send half and a Receive half
-    let (mut socket_sender, mut socket_receiver) = socket.split();
+    let (mut socket_sender, _) = socket.split();
 
     // 2. Subscribe this specific client to the global broadcast channel
     let mut broadcast_rx = state.nmea_tx.subscribe();
@@ -38,6 +38,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
                             json!({ "event": "live_status", "data": live_status }).to_string();
                         if let Err(e) = socket_sender.send(Message::Text(json)).await {
                             eprintln!("Failed to send message to client: {}", e);
+                            break;
                         };
                     }
                     Err(e) => eprintln!("Failed to parse NMEA messages: {}", e),

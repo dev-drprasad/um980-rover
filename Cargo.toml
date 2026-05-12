@@ -23,10 +23,22 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 futures = "0.3"
 nmea = {version = "0.6", features = ["serde"]}
 base64 = "0.22"
+linux-embedded-hal = "0.3.2"
+st7789 = "0.6.1"
+embedded-graphics = "0.7.1"
+display-interface-spi = "0.4.1" # ADD THIS NEW CRATE
+tinybmp = "0.3.3" # NEW CRATE
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+uuid = { version = "1", features = ["v4"] }
 
 [[bin]]
-name = "nmea-tcp"
+name = "rover"
 path = "main.rs"
+
+[[bin]]
+name = "display"
+path = "src/bin/display/main.rs"
 
 
 [target.arm-unknown-linux-gnueabihf]

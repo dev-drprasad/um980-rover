@@ -3,3 +3,4 @@
 web/node_modules
 mock
 tracking_data.json
+.env

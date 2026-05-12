@@ -38,6 +38,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<appstate::AppState>) {
                 .to_string();
                 if let Err(e) = socket_sender.send(Message::Text(json)).await {
                     eprintln!("Failed to send message to client: {}", e);
+                    break;
                 }
             }
         }

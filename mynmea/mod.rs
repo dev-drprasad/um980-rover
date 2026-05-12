@@ -1,56 +1,14 @@
 use nusb::{
-    MaybeFuture,
+    Device, MaybeFuture,
     io::{EndpointRead, EndpointWrite},
     list_devices,
     transfer::{Bulk, ControlOut, ControlType, In, Out, Recipient},
 };
-use regex::Regex;
 use serde_json::json;
-use std::io::{Error, ErrorKind};
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::{io::AsyncReadExt, time::interval};
 pub mod parse_nmea;
-
-/// Holds the calculated horizontal accuracy metrics in meters.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct HorizontalAccuracy {
-    pub lat_err: f64,
-    pub lon_err: f64,
-    pub drms: f64,
-    pub twice_drms: f64,
-}
-
-// We use OnceLock so the Regex is only compiled once for maximum loop performance
-static GST_REGEX: OnceLock<Regex> = OnceLock::new();
-
-/// Parses any GST NMEA string ($GPGST, $GNGST, $GLGST) and returns the accuracy.
-pub fn parse_gst_accuracy(raw_sentence: &str) -> Option<HorizontalAccuracy> {
-    // 1. Get or initialize the compiled Regex
-    // This pattern skips the first 5 comma-separated values and explicitly captures fields 6 and 7
-    let re = GST_REGEX.get_or_init(|| {
-        Regex::new(r"^\$[A-Z]{2}GST,(?:[^,]*,){5}([^,]+),([^,]+),[^*]+\*[0-9A-Fa-f]{2}").unwrap()
-    });
-
-    // 2. Execute the Regex against the incoming string
-    let caps = re.captures(raw_sentence)?;
-
-    // 3. Extract and parse the Latitude (Capture Group 1) and Longitude (Capture Group 2)
-    let lat_err: f64 = caps.get(1)?.as_str().parse().ok()?;
-    let lon_err: f64 = caps.get(2)?.as_str().parse().ok()?;
-
-    // 4. Calculate DRMS and 2DRMS
-    let drms = (lat_err.powi(2) + lon_err.powi(2)).sqrt();
-    let twice_drms = drms * 2.0;
-
-    Some(HorizontalAccuracy {
-        lat_err,
-        lon_err,
-        drms,
-        twice_drms,
-    })
-}
 
 pub async fn read_nmea_and_broadcast(
     nmea_tx: tokio::sync::broadcast::Sender<String>,
@@ -131,6 +89,7 @@ pub async fn read_nmea_and_broadcast(
             }
             // Force the buffer to push to the hardware immediately
             if let Err(e) = usb_writer.flush().await {
+                // handle `hardware fault or protocol violation` and try `usbreset` command using `nusb`
                 println!("Failed to flush USB writer: {}", e);
                 break;
             }
@@ -142,16 +101,38 @@ pub async fn read_nmea_and_broadcast(
 async fn connect_to_device() -> Result<(EndpointRead<Bulk>, EndpointWrite<Bulk>), anyhow::Error> {
     // 1. Find the CH340 device (VID: 0x1A86, PID: 0x7523)
     // Note: list_devices() is usually synchronous in nusb, so we just iterate it.
-    let device_info = list_devices()
+    let devices_info = list_devices()
         .await?
-        .find(|dev| dev.vendor_id() == 0x1a86 && dev.product_id() == 0x7523)
-        .ok_or_else(|| Error::new(ErrorKind::NotFound, "CH340 device not found"))?;
+        .filter(|dev| dev.vendor_id() == 0x1a86 && dev.product_id() == 0x7523)
+        .collect::<Vec<_>>();
 
-    println!("Found device: {:?}", device_info);
+    let device_count = devices_info.len();
+    if device_count == 0 {
+        return Err(anyhow::anyhow!(
+            "No CH340 device found. Please plug in your GPS module."
+        ));
+    }
+    println!("Found {} devices", device_count);
+
+    let mut device: Option<Device> = None;
+    for d in devices_info {
+        match d.open().wait() {
+            Ok(d) => {
+                device = Some(d);
+                break;
+            }
+            Err(e) => {
+                eprintln!("Error opening device: {}", e);
+                continue;
+            }
+        }
+    }
 
     // 2. Open the device
-    // We use .wait()? to resolve the MaybeFuture synchronously
-    let device = device_info.open().wait()?;
+    let device = match device {
+        Some(d) => d,
+        None => return Err(anyhow::anyhow!("Failed to open any CH340 device.")),
+    };
 
     // 3. Claim the interfaces (0 for Control, 1 for Data)
     let interface = device.detach_and_claim_interface(0).await?;

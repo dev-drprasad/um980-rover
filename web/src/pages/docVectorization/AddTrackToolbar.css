@@ -1,0 +1,11 @@
+.add-tracking-toolbar-root {
+    .add-tracking-toolbar {
+        display: flex;
+        gap: 1rem;
+        border-radius: 50vh;
+        background-color: lightsalmon;
+        color: wheat;
+        padding: 1rem;
+        font-weight: 600;
+    }
+}

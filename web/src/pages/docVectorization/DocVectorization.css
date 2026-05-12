@@ -1,0 +1,122 @@
+.docVectorizationUploadForm {
+  display: flex;
+  flex-direction: column;
+  gap: 1.6rem;
+  padding: var(--padding);
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+.doc-vectorization-page {
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+
+  .add-track-toolbar {
+    position: absolute;
+      bottom: 0.6rem;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 2;
+  }
+
+  .measuremen-scale-button {
+    position: absolute;
+    bottom: 0.6rem;
+    left: calc(50% + 7rem);
+    transform: translateX(-50%);
+    z-index: 2;
+  }
+}
+
+.set-scale-dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1.6rem;
+  width: 80vw;
+  max-width: 50rem;
+
+  .inputs {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 1.6rem;
+  }
+}
+
+.close-dialog-button {
+  position: absolute;
+  top: 0rem;
+  right: -1rem;
+  cursor: pointer;
+  transform: translateX(100%);
+}
+
+label:has(input, select) {
+  color: slateblue;
+  position: relative;
+
+  .input-label {
+    position: absolute;
+    top: 0.6rem;
+    left: 1rem;
+    font-size: 1.2rem;
+    color: slateblue;
+    font-weight: 600;
+  }
+
+  input[type="text"],input[type="number"], select {
+    width: 100%;
+    padding: 1.6rem 1rem 0.5rem 1rem;
+  }
+
+  select {
+    appearance: none;
+  }
+}
+
+dialog.dialog {
+  overflow: visible;
+  position: relative;
+  opacity: 0;
+  color: var(--text);
+  transform: scale(0.5);
+  background-color: rgba(240,240,240,0.9);
+  padding: 1.6rem;
+  border-radius: 1rem;
+  transition: opacity 0.5s ease-out, transform 0.5s ease-out,
+    display 0.5s allow-discrete, overlay 0.5s allow-discrete;
+}
+dialog.dialog[open] {
+  opacity: 1;
+  transform: scale(1);
+}
+
+input[type="text"],input[type="number"], select {
+  padding: 0.5rem;
+  background-color: white;
+  border: 0.4rem solid wheat;
+  border-radius: 1rem;
+  height: 5rem;
+
+  &:focus {
+    border: 0.4rem solid slateblue;
+    outline: none;
+  }
+}
+
+@starting-style {
+  dialog.dialog[open] {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+}
+
+dialog.dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0);
+  transition: background-color 0.5s ease-out,
+    display 0.5s allow-discrete, overlay 0.5s allow-discrete;
+}
+
+dialog.dialog[open]::backdrop {
+  background-color: rgba(0, 0, 0, 0.5);
+}

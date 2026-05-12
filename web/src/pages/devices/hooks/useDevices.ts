@@ -20,7 +20,6 @@ export function useDevices() {
       setState({ data: null, status: "pending" });
       try {
         const devices = await deviceAPI.get<SerialDevice[]>("devices").json();
-        console.log("devices :>> ", devices);
         setState({ data: devices, status: "success" });
       } catch (error) {
         console.error(error);

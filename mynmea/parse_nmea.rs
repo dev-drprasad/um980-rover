@@ -5,8 +5,8 @@ use regex::Regex;
 
 #[derive(serde::Serialize)]
 pub struct LiveStatus {
-    latitude: Option<f64>,
-    longitude: Option<f64>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
     altitude: Option<f32>,
     speed_over_ground: Option<f32>,
     fix_type: Option<nmea::sentences::FixType>,
