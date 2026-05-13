@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Redirecting...</title>
+
+  <script>
+    // GitHub Pages SPA redirect
+    // Redirects all 404s to index.html while preserving path
+
+    const path = window.location.pathname;
+    const search = window.location.search;
+    const hash = window.location.hash;
+
+    // Change this if your repo name is different
+    const repo = "/um980-rover/";
+
+    const redirectUrl =
+      repo +
+      "?redirect=" +
+      encodeURIComponent(path + search + hash);
+
+    window.location.replace(redirectUrl);
+  </script>
+</head>
+
+<body>
+  Redirecting...
+</body>
+
+</html>
