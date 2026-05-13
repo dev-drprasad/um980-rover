@@ -20,7 +20,9 @@ const routes: RouteObject[] = [
   { path: "rover-setup", Component: RoverSetupPage },
 ];
 
-const router = createBrowserRouter(routes);
+const router = createBrowserRouter(routes, {
+  basename: "/um980-rover",
+});
 
 function App() {
   return <RouterProvider router={router} />;
