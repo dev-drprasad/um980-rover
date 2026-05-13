@@ -170,7 +170,13 @@ export function DocVectorizationPage() {
   }
   return (
     <form className="docVectorizationUploadForm" onSubmit={handleSubmit}>
-      <FormInput label="Image File" name="image" type="file" accept="image/*" />
+      <FormInput
+        label="Image File"
+        name="image"
+        type="file"
+        accept="image/*"
+        required
+      />
       <FilledButton type="submit">Upload</FilledButton>
     </form>
   );

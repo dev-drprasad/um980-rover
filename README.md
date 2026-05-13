@@ -201,3 +201,11 @@ sudo usbreset 1a86:7523
 rtk2go.com:2101
 IndiaTN02
 ```
+
+### For building package with bluetooth feature:
+
+Currently building for `musl` is not working
+
+```
+ CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --target aarch64-unknown-linux-gnu --release
+```

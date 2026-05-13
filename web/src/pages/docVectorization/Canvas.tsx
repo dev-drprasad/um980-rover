@@ -7,7 +7,7 @@ import {
   Text,
 } from "react-konva";
 import Konva from "konva";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./DocVectorization.css";
 import type { XY } from "../../entities/LatLng";
 
@@ -35,6 +35,64 @@ export function Canvas({
   const stageRef = useRef<Konva.Stage | null>(null);
 
   const [scale, setScale] = useState(1);
+  const [selectedCornerIndex, setSelectedCornerIndex] = useState<number | null>(
+    null,
+  );
+  const [isDraggingCorner, setIsDraggingCorner] = useState(false);
+
+  const updateCornerAtCanvasPosition = useCallback(
+    (index: number, x: number, y: number) => {
+      const normX = x / stageWidth;
+      const normY = y / stageHeight;
+
+      setDraftTrack((prev) =>
+        prev.map((point, pointIndex) =>
+          pointIndex === index ? { x: normX, y: normY } : point,
+        ),
+      );
+    },
+    [setDraftTrack, stageHeight, stageWidth],
+  );
+
+  const handleCornerClick = useCallback(
+    (index: number, e: Konva.KonvaEventObject<MouseEvent>) => {
+      e.cancelBubble = true;
+      setSelectedCornerIndex(index);
+    },
+    [],
+  );
+
+  const handleCornerTap = useCallback(
+    (index: number, e: Konva.KonvaEventObject<TouchEvent>) => {
+      e.cancelBubble = true;
+      setSelectedCornerIndex(index);
+    },
+    [],
+  );
+
+  const handleCornerDragMove = useCallback(
+    (index: number, e: Konva.KonvaEventObject<DragEvent>) => {
+      const node = e.target;
+      updateCornerAtCanvasPosition(index, node.x(), node.y());
+    },
+    [updateCornerAtCanvasPosition],
+  );
+
+  const handleCornerDragStart = useCallback(
+    (e: Konva.KonvaEventObject<DragEvent>) => {
+      e.cancelBubble = true;
+      setIsDraggingCorner(true);
+    },
+    [],
+  );
+
+  const handleCornerDragEnd = useCallback(
+    (e: Konva.KonvaEventObject<DragEvent>) => {
+      e.cancelBubble = true;
+      setIsDraggingCorner(false);
+    },
+    [],
+  );
 
   // =============================
   // 🧠 Click → normalized canvas coords
@@ -123,7 +181,7 @@ export function Canvas({
       ref={stageRef}
       onClick={handleClick}
       onWheel={handleWheel}
-      draggable
+      draggable={!isDraggingCorner}
       style={{ background: "#111" }}
     >
       <Layer>
@@ -140,7 +198,21 @@ export function Canvas({
 
         {/* Points */}
         {canvasPoints.map((p, i) => (
-          <Circle key={i} x={p.x} y={p.y} radius={4} fill="red" />
+          <Circle
+            key={i}
+            x={p.x}
+            y={p.y}
+            radius={selectedCornerIndex === i ? 6 : 4}
+            fill={selectedCornerIndex === i ? "#ffffff" : "tomato"}
+            stroke={selectedCornerIndex === i ? "tomato" : "#ffffff"}
+            strokeWidth={selectedCornerIndex === i ? 3 : 1}
+            draggable
+            onClick={(e) => handleCornerClick(i, e)}
+            onTap={(e) => handleCornerTap(i, e)}
+            onDragStart={handleCornerDragStart}
+            onDragMove={(e) => handleCornerDragMove(i, e)}
+            onDragEnd={handleCornerDragEnd}
+          />
         ))}
 
         {/* Polygon */}

@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 mod appstate;
+mod connection;
 mod get_current_latlng;
 mod mynmea;
 mod ntrip_client;
@@ -33,6 +34,12 @@ struct Assets;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:8080";
     let listener = TcpListener::bind(addr).await?;
+
+    tokio::spawn(async {
+        if let Err(e) = connection::broadcast_ip().await {
+            eprintln!("Error broadcasting IP: {}", e);
+        }
+    });
 
     // Create a broadcast channel with a buffer capacity of 100 messages
     let (rtcm_tx, _rx) = broadcast::channel(100);

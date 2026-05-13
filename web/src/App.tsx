@@ -9,6 +9,7 @@ import { HomePage } from "./pages/root/HomePage";
 import { TerminalPage } from "./pages/terminal";
 import { DocVectorizationPage } from "./pages/docVectorization/DocVectorization";
 import { NTRIPSettingsPage } from "./pages/ntrip/ui/NTRIPSettingsPage";
+import { RoverSetupPage } from "./pages/roversetup/ui/RoverSetupPage";
 
 const routes: RouteObject[] = [
   { path: "", Component: HomePage },
@@ -16,6 +17,7 @@ const routes: RouteObject[] = [
   { path: "devices", Component: DevicesPage },
   { path: "terminal", Component: TerminalPage },
   { path: "doc-vectorization", Component: DocVectorizationPage },
+  { path: "rover-setup", Component: RoverSetupPage },
 ];
 
 const router = createBrowserRouter(routes);
