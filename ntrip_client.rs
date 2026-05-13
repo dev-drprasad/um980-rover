@@ -133,13 +133,12 @@ pub async fn ntrip_client(
             if let Ok(nmea_messages) = serde_json::from_str::<Vec<String>>(&msg) {
                 for sentence in nmea_messages {
                     if sentence.contains("GGA,") {
-                        println!("VRS position: {}", sentence.trim());
                         if sentence.contains(",N,") {
                             if let Err(e) = tcp_write.write_all(sentence.as_bytes()).await {
                                 println!("Failed to upload GGA to Caster: {}", e);
                                 break;
                             }
-                            println!("Uploaded VRS position: {}", sentence.trim());
+                            // println!("Uploaded VRS position: {}", sentence.trim());
                         }
                     }
                 }

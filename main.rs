@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
+use tokio::task::spawn_blocking;
 use tower_http::cors::CorsLayer;
 mod appstate;
 mod connection;
@@ -40,6 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Error broadcasting IP: {}", e);
         }
     });
+
+    // tokio::task::spawn_blocking(|| mynmea::listen_for_device_changes());
 
     // Create a broadcast channel with a buffer capacity of 100 messages
     let (rtcm_tx, _rx) = broadcast::channel(100);

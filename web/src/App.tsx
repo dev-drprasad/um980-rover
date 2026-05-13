@@ -21,7 +21,7 @@ const routes: RouteObject[] = [
 ];
 
 const router = createBrowserRouter(routes, {
-  basename: "/um980-rover",
+  basename: import.meta.env.BASE_URL || "",
 });
 
 function App() {

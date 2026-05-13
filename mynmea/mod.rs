@@ -1,101 +1,178 @@
 use nusb::{
-    Device, MaybeFuture,
+    Device, DeviceId, DeviceInfo, MaybeFuture,
+    hotplug::HotplugEvent,
     io::{EndpointRead, EndpointWrite},
     list_devices,
     transfer::{Bulk, ControlOut, ControlType, In, Out, Recipient},
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::{io::AsyncReadExt, time::interval};
 pub mod parse_nmea;
+use futures::executor;
+use nusb::watch_devices;
+
+const INITIALIZE_CHIP: ControlOut = ControlOut {
+    control_type: ControlType::Vendor,
+    recipient: Recipient::Device,
+    request: 0xA1,
+    value: 0x0000,
+    index: 0x0000,
+    data: &[],
+};
+
+const BAUD_RATE_CONTROL: ControlOut = ControlOut {
+    control_type: ControlType::Vendor,
+    recipient: Recipient::Device,
+    request: 0x9A,
+    value: 0x1312,
+    index: 0xCC03,
+    data: &[],
+};
+
+const LINE_CONTROL: ControlOut = ControlOut {
+    control_type: ControlType::Vendor,
+    recipient: Recipient::Device,
+    request: 0x9A,
+    value: 0x2518,
+    index: 0x00C3,
+    data: &[],
+};
+
+pub fn listen_for_device_changes() {
+    println!("Watching USB devices...");
+
+    println!("Listening for USB events (Blocking)...");
+
+    // Initialize the hotplug watcher
+    let watcher = nusb::watch_devices().expect("Failed to initialize device watcher");
+
+    let mut blocking_stream = executor::block_on_stream(watcher);
+
+    // Iterate over the stream synchronously
+    for event in blocking_stream {
+        match event {
+            HotplugEvent::Connected(device) => {
+                // device is of type DeviceInfo
+                println!(
+                    "🔌 DEVICE CONNECTED: VID {:04x}:{:04x} (Bus: {}, Addr: {})",
+                    device.vendor_id(),
+                    device.product_id(),
+                    device.bus_id(),
+                    device.device_address()
+                );
+
+                // You can get additional info like manufacturer strings if available
+                if let Some(name) = device.product_string() {
+                    println!("   -> Product: {}", name);
+                }
+            }
+            HotplugEvent::Disconnected(device_id) => {
+                // device_id is an opaque DeviceId
+                println!("❌ DEVICE DISCONNECTED: ID {:?}", device_id);
+            }
+        }
+    }
+}
 
 pub async fn read_nmea_and_broadcast(
     nmea_tx: tokio::sync::broadcast::Sender<String>,
     rtcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) {
-    let (mut usb_reader, mut usb_writer) = connect_to_device()
-        .await
-        .expect("Failed to connect to GPS device");
-    tokio::spawn(async move {
-        let mut buf = [0u8; 256];
-
-        // 1. Set up a ticker that fires exactly every 500ms
-        let mut ticker = interval(Duration::from_millis(500));
-
-        // 2. Create a temporary vector to hold the sentences we collect during that window
-        let mut collected_sentences: Vec<String> = Vec::new();
-        let mut line_buffer = String::new();
-
-        loop {
-            tokio::select! {
-                // --- BRANCH 1: The 500ms Timer ---
-                _ = ticker.tick() => {
-                    // When 500ms passes, check if we collected anything
-                    if !collected_sentences.is_empty() {
-                        // Package the entire array into one JSON string
-                        let payload = json!(collected_sentences).to_string();
-
-                        // Blast it out to the clients
-                        if let Err(e) = nmea_tx.send(payload) {
-                            eprintln!("Broadcasting nmea failed: {}", e);
-                        }
-
-                        // Clear the vector so it's empty for the next 500ms window
-                        collected_sentences.clear();
-                    }
+    loop {
+        let (mut usb_reader, mut usb_writer) = loop {
+            match connect_to_device().await {
+                Ok(io) => break io,
+                Err(e) => {
+                    println!(
+                        "Failed to connect to GPS device: {}. Retrying in 10 seconds...",
+                        e
+                    );
+                    tokio::time::sleep(Duration::from_secs(10)).await;
                 }
+            }
+        };
 
-                // --- BRANCH 2: The Continuous USB Reader ---
-                read_result = usb_reader.read(&mut buf) => {
-                    match read_result {
-                        Ok(bytes_read) if bytes_read > 0 => {
-                            if let Ok(text) = std::str::from_utf8(&buf[..bytes_read]) {
-                                line_buffer.push_str(text);
+        let nmea_tx = nmea_tx.clone();
 
-                                while let Some(idx) = line_buffer.find('\n') {
-                                    // Extract the sentence and trim any \r or whitespace
-                                    let sentence = line_buffer[..=idx].trim().to_string();
-                                    line_buffer.drain(..=idx);
+        let read_task = async {
+            let mut buf = [0u8; 256];
+            let mut ticker = interval(Duration::from_millis(500));
 
-                                    // Instead of sending, just push it into our collection bucket
-                                    if !sentence.is_empty() {
-                                        collected_sentences.push(sentence);
+            let mut collected_sentences: Vec<String> = Vec::new();
+            let mut line_buffer = String::new();
+
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if !collected_sentences.is_empty() {
+                            let payload = json!(collected_sentences).to_string();
+                            if let Err(e) = nmea_tx.send(payload) {
+                                eprintln!("Broadcasting nmea failed: {}", e);
+                            }
+                            collected_sentences.clear();
+                        }
+                    }
+
+                    read_result = usb_reader.read(&mut buf) => {
+                        match read_result {
+                            Ok(bytes_read) if bytes_read > 0 => {
+                                if let Ok(text) = std::str::from_utf8(&buf[..bytes_read]) {
+                                    line_buffer.push_str(text);
+
+                                    while let Some(idx) = line_buffer.find('\n') {
+                                        let sentence = line_buffer[..=idx].trim().to_string();
+                                        line_buffer.drain(..=idx);
+                                        if !sentence.is_empty() {
+                                            collected_sentences.push(sentence);
+                                        }
                                     }
                                 }
                             }
+                            Ok(0) => {
+                                println!("USB stream closed (0 bytes read). Device likely unplugged.");
+                                break;
+                            }
+                            Err(e) => {
+                                println!("USB NMEA Stream closed by device: {}", e);
+                                break;
+                            }
+                            _ => {}
                         }
-                        Ok(0) => {
-                            println!("USB stream closed (0 bytes read). Device likely unplugged.");
-                            break;
-                        }
-                        Err(e) => {
-                            println!("USB NMEA Stream closed by device: {}", e);
-                            break;
-                        }
-                        _ => {} // Ignore Ok(_) where bytes_read == 0 without EOF, just in case
                     }
                 }
             }
-        }
-    });
+        };
 
-    let mut rtcm_receiver = rtcm_tx.subscribe();
-    _ = tokio::spawn(async move {
-        while let Ok(msg) = rtcm_receiver.recv().await {
-            if let Err(e) = usb_writer.write_all(&msg).await {
-                println!("Failed to write RTCM to USB: {}", e);
-                break;
+        let mut rtcm_receiver = rtcm_tx.subscribe();
+        let write_task = async {
+            while let Ok(msg) = rtcm_receiver.recv().await {
+                if let Err(e) = usb_writer.write_all(&msg).await {
+                    println!("Failed to write RTCM to USB: {}", e);
+                    break;
+                }
+                if let Err(e) = usb_writer.flush().await {
+                    println!("Failed to flush USB writer: {}", e);
+                    break;
+                }
+                // println!("Received {} bytes of RTCM, forwarded to USB.", msg.len());
             }
-            // Force the buffer to push to the hardware immediately
-            if let Err(e) = usb_writer.flush().await {
-                // handle `hardware fault or protocol violation` and try `usbreset` command using `nusb`
-                println!("Failed to flush USB writer: {}", e);
-                break;
+        };
+
+        tokio::select! {
+            _ = read_task => {
+                println!("USB Reader disconnected.");
             }
-            println!("Received {} bytes of RTCM, forwarded to USB.", msg.len());
+            _ = write_task => {
+                println!("USB Writer disconnected.");
+            }
         }
-    })
+
+        println!("Retrying USB connection in 10 seconds...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
 }
 
 async fn connect_to_device() -> Result<(EndpointRead<Bulk>, EndpointWrite<Bulk>), anyhow::Error> {
@@ -112,7 +189,6 @@ async fn connect_to_device() -> Result<(EndpointRead<Bulk>, EndpointWrite<Bulk>)
             "No CH340 device found. Please plug in your GPS module."
         ));
     }
-    println!("Found {} devices", device_count);
 
     let mut device: Option<Device> = None;
     for d in devices_info {
@@ -136,40 +212,10 @@ async fn connect_to_device() -> Result<(EndpointRead<Bulk>, EndpointWrite<Bulk>)
 
     // 3. Claim the interfaces (0 for Control, 1 for Data)
     let interface = device.detach_and_claim_interface(0).await?;
-    // let data_interface = device.detach_and_claim_interface(1).await?;
-
-    // 4. Assert DTR/RTS to wake up the serial chip
-    // This tells the CH340 that a terminal is ready to receive data.
-    // control_interface
-    //     .control_out(
-    //         ControlOut {
-    //             control_type: ControlType::Class,
-    //             recipient: Recipient::Interface,
-    //             request: 0x22,
-    //             value: 0x03,
-    //             index: 0x00,
-    //             data: &[],
-    //         },
-    //         Duration::from_millis(100),
-    //     )
-    //     .wait()?;
-
-    // 4. CH340 Proprietary Initialization & Baud Rate Setup
-    // Use ControlType::Vendor instead of Class for CH340 chips
 
     // A. Initialize the chip
     interface
-        .control_out(
-            ControlOut {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: 0xA1,
-                value: 0x0000,
-                index: 0x0000,
-                data: &[],
-            },
-            Duration::from_millis(100),
-        )
+        .control_out(INITIALIZE_CHIP, Duration::from_millis(100))
         .wait()?;
 
     // B. Set the Baud Rate
@@ -177,37 +223,13 @@ async fn connect_to_device() -> Result<(EndpointRead<Bulk>, EndpointWrite<Bulk>)
     // 9600 Baud   = index: 0xB202
     // 115200 Baud = index: 0xCC03
     interface
-        .control_out(
-            ControlOut {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: 0x9A,
-                value: 0x1312,
-                index: 0xCC03, // <--- Change this to 0xCC03 if 9600 gives you garbage!
-                data: &[],
-            },
-            Duration::from_millis(100),
-        )
+        .control_out(BAUD_RATE_CONTROL, Duration::from_millis(100))
         .wait()?;
 
     // C. Set Line Control (8 data bits, No parity, 1 stop bit) & Enable UART
     interface
-        .control_out(
-            ControlOut {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: 0x9A,
-                value: 0x2518,
-                index: 0x00C3,
-                data: &[],
-            },
-            Duration::from_millis(100),
-        )
+        .control_out(LINE_CONTROL, Duration::from_millis(100))
         .wait()?;
-
-    println!("CH340 Initialized. Baud rate set. Listening...");
-
-    println!("DTR/RTS asserted. Device should start transmitting...");
 
     // 5. Find the Bulk IN endpoint dynamically
     // (For CH340 it is almost always 0x82, but it's safest to check)
@@ -227,8 +249,6 @@ async fn connect_to_device() -> Result<(EndpointRead<Bulk>, EndpointWrite<Bulk>)
             }
         }
     }
-
-    println!("USB IN: 0x{:02X}, USB OUT: 0x{:02X}", ep_in, ep_out);
 
     let usb_reader = interface.endpoint::<Bulk, In>(ep_in)?.reader(4096);
     let usb_writer = interface.endpoint::<Bulk, Out>(ep_out)?.writer(4096);
